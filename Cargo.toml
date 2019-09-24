@@ -1,0 +1,10 @@
+[package]
+name = "homesync"
+version = "0.1.0"
+authors = ["henenq <henrik.enquist@maxiv.lu.se>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+notify = "4.0.13"
