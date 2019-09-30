@@ -7,27 +7,59 @@ use std::env;
 use std::thread::sleep;
 use std::time;
 use std::path::{Path, PathBuf};
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 enum SyncAction {
-    CopyFile(PathBuf, PathBuf),
-    CopyDir(PathBuf, PathBuf),
-    CopyMeta(PathBuf, PathBuf),
-    Rename(PathBuf, PathBuf),
-    DeleteFile(PathBuf),
-    DeleteDir(PathBuf),
+    CopyFile {src: PathBuf, dest: PathBuf},
+    CopyDir {src: PathBuf, dest: PathBuf},
+    CopyMeta {src: PathBuf, dest: PathBuf},
+    Rename {src: PathBuf, dest: PathBuf},
+    DeleteFile {src: PathBuf},
+    DeleteDir {src: PathBuf},
+}
+
+trait Prio {
+    fn prio(&self) -> usize;
+}
+
+impl Prio for SyncAction {
+    fn prio(&self) -> usize {
+        match self {
+            &SyncAction::CopyFile {src: _, dest: _} => 2,
+            &SyncAction::CopyDir {src: _, dest: _} => 1,
+            &SyncAction::CopyMeta {src: _, dest: _} => 6,
+            &SyncAction::Rename {src: _, dest: _} => 3,
+            &SyncAction::DeleteFile {src: _} => 4,
+            &SyncAction::DeleteDir {src: _} => 5,
+        }
+    }
 }
 
 impl PartialEq for SyncAction {
     fn eq(&self, other: &SyncAction) -> bool {
         match (self, other) {
-            (&SyncAction::CopyFile(ref a1, ref a2), &SyncAction::CopyFile(ref b1, ref b2))
-            | (&SyncAction::CopyDir(ref a1, ref a2), &SyncAction::CopyDir(ref b1, ref b2))
-            | (&SyncAction::CopyMeta(ref a1, ref a2), &SyncAction::CopyMeta(ref b1, ref b2))
-            | (&SyncAction::Rename(ref a1, ref a2), &SyncAction::Rename(ref b1, ref b2)) => {(a1 == b1 && a2 == b2)},
-            (&SyncAction::DeleteFile(ref a), &SyncAction::DeleteFile(ref b))
-            | (&SyncAction::DeleteDir(ref a), &SyncAction::DeleteDir(ref b)) => (a == b),
+            (&SyncAction::CopyFile {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyFile {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::Rename {src: ref src_a, dest: ref dest_a}, &SyncAction::Rename {src: ref src_b, dest: ref dest_b}) => {(src_a == src_b && dest_a == dest_b)},
+            (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
+            | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => (src_a == src_b),
             _ => false,
+        }
+    }
+}
+
+impl PartialOrd for SyncAction {
+    fn partial_cmp(&self, other: &SyncAction) -> Option<Ordering> {
+        match (self, other) {
+            (&SyncAction::CopyFile {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyFile {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b}) => src_a.iter().count().partial_cmp(&src_b.iter().count()),
+            | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::Rename {src: ref src_a, dest: ref dest_a}, &SyncAction::Rename {src: ref src_b, dest: ref dest_b}) => src_b.iter().count().partial_cmp(&src_a.iter().count()),
+            (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
+            | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => src_b.iter().count().partial_cmp(&src_a.iter().count()),
+            _ => self.prio().partial_cmp(&other.prio()),
         }
     }
 }
@@ -74,7 +106,7 @@ fn watch(path_a: &String, path_b: &String, interval: u64) -> notify::Result<()> 
 fn handle_event(path_a: &String, path_b: &String, event: notify::DebouncedEvent) {
     println!("{:?}", event);
     match event {
-        notify::DebouncedEvent::Create(e) => println!("create {:?}",SyncAction::CopyFile(PathBuf::from("/tmp"), PathBuf::from("/tmp"))),
+        notify::DebouncedEvent::Create(e) => println!("create {:?}",SyncAction::CopyFile {src: PathBuf::from("/tmp"), dest: PathBuf::from("/tmp")}),
         notify::DebouncedEvent::Write(e) => println!("write {:?}",e),
         notify::DebouncedEvent::NoticeWrite(e) => println!("notice write something"),
         notify::DebouncedEvent::NoticeRemove(e) => println!("notice write something"),
@@ -91,6 +123,17 @@ fn main() {
     let path_a = &args[1];
     let path_b = &args[2];
     let interval: u64 = args[3].parse().unwrap();
+
+    let mut actions = Vec::new();
+    actions.push(SyncAction::CopyFile {src: PathBuf::from("/tmp/dir"), dest: PathBuf::from("/tmp/dir")});
+    actions.push(SyncAction::CopyFile {src: PathBuf::from("/tmp"), dest: PathBuf::from("/tmp")});
+    actions.push(SyncAction::CopyDir {src: PathBuf::from("/tmp"), dest: PathBuf::from("/tmp")});
+    actions.push(SyncAction::CopyMeta {src: PathBuf::from("/tmp"), dest: PathBuf::from("/tmp")});
+    actions.push(SyncAction::DeleteFile {src: PathBuf::from("/tmp")});
+
+    actions.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("{:?}", actions);
+
     if let Err(e) = watch(path_a, path_b, interval) {
         println!("error: {:?}", e)
     }
