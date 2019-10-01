@@ -6,7 +6,7 @@ use std::time::Duration;
 use std::env;
 use std::thread::sleep;
 use std::time;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::cmp::Ordering;
 use std::fs;
 use filetime::FileTime;
@@ -184,7 +184,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
                 events += 1;
                 queue_actions(&mut action_queue, path_a, path_b, event);
             },
-            Err(e) => {
+            Err(_e) => {
                 if events>0 {
                     println!("Received {} events", events);
                     println!("Actions {:?} events", action_queue);
@@ -229,11 +229,11 @@ fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &
             action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
             Ok(())
         },
-        notify::DebouncedEvent::NoticeWrite(path) => {
+        notify::DebouncedEvent::NoticeWrite(_path) => {
             println!("notice write something");
             Ok(())
         },
-        notify::DebouncedEvent::NoticeRemove(path) => {
+        notify::DebouncedEvent::NoticeRemove(_path) => {
             println!("notice write something");
             Ok(())
         },
@@ -263,7 +263,7 @@ fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &
             println!("rescan");
             Ok(())
         },
-        notify::DebouncedEvent::Error(a,b) => {
+        notify::DebouncedEvent::Error(_a,_b) => {
             println!("error");
             Ok(())
         }
