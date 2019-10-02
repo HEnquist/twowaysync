@@ -1,6 +1,6 @@
 extern crate notify;
 
-use notify::{RecommendedWatcher, Watcher, RecursiveMode, PollWatcher};
+use notify::{Watcher, RecursiveMode, PollWatcher};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::env;
@@ -80,10 +80,10 @@ impl PartialEq for SyncAction {
 impl Ord for SyncAction {
     fn cmp(&self, other: &SyncAction) -> Ordering {
         match (self, other) {
-            (&SyncAction::CopyFile {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyFile {src: ref src_b, dest: ref dest_b})
-            | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b}) => src_a.iter().count().cmp(&src_b.iter().count()),
-            | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
-            | (&SyncAction::Rename {src: ref src_a, dest: ref dest_a}, &SyncAction::Rename {src: ref src_b, dest: ref dest_b}) => src_b.iter().count().cmp(&src_a.iter().count()),
+            (&SyncAction::CopyFile {src: ref src_a, dest: _}, &SyncAction::CopyFile {src: ref src_b, dest: _})
+            | (&SyncAction::CopyDir {src: ref src_a, dest: _}, &SyncAction::CopyDir {src: ref src_b, dest: _}) => src_a.iter().count().cmp(&src_b.iter().count()),
+            | (&SyncAction::CopyMeta {src: ref src_a, dest: _}, &SyncAction::CopyMeta {src: ref src_b, dest: _})
+            | (&SyncAction::Rename {src: ref src_a, dest: _}, &SyncAction::Rename {src: ref src_b, dest: _}) => src_b.iter().count().cmp(&src_a.iter().count()),
             (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
             | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => src_b.iter().count().cmp(&src_a.iter().count()),
             _ => self.prio().cmp(&other.prio()),
@@ -107,10 +107,10 @@ impl RunAction for SyncAction {
     fn run(&self) -> Result<(), Box<Error>> {
         match self {
             SyncAction::CopyFile {src, dest} => {
-                let bytescopied = fs::copy(&src, &dest)?;
+                let _bytescopied = fs::copy(&src, &dest)?;
                 Ok(())
             },
-            SyncAction::CopyDir {src, dest} => {
+            SyncAction::CopyDir {src: _, dest} => {
                 fs::create_dir(&dest)?;
                 Ok(())
             },
@@ -120,7 +120,7 @@ impl RunAction for SyncAction {
                 let attr = fs::metadata(&src).unwrap();
                 let mtime = FileTime::from_last_modification_time(&attr);
                 let atime = FileTime::from_last_access_time(&attr);
-                let res = filetime::set_file_times(&dest, atime, mtime);
+                let _res = filetime::set_file_times(&dest, atime, mtime);
                 Ok(())
             },
             SyncAction::Rename {src, dest} => {
@@ -182,7 +182,12 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
         match rx.try_recv() {
             Ok(event) => {
                 events += 1;
-                queue_actions(&mut action_queue, path_a, path_b, event);
+                match queue_actions(&mut action_queue, path_a, path_b, event) {
+                    Ok(_) => {},
+                    Err(e) => {
+                        println!("Run error {}", e);
+                    }
+                }
             },
             Err(_e) => {
                 if events>0 {
@@ -191,7 +196,12 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
                     events = 0; 
                     action_queue.sort();
                     for action in action_queue.drain(..) {
-                        action.run();
+                        match action.run() {
+                            Ok(_) => {},
+                            Err(e) => {
+                                println!("Run error {}", e);
+                            }
+                        }
                     }
                 }
                 //println!("watch error: {:?}", e);
