@@ -100,11 +100,11 @@ impl PartialOrd for SyncAction {
 }
 
 trait RunAction {
-    fn run(&self) -> Result<(), Box<Error>>;
+    fn run(&self) -> Result<(), Box<dyn Error>>;
 }
 
 impl RunAction for SyncAction {
-    fn run(&self) -> Result<(), Box<Error>> {
+    fn run(&self) -> Result<(), Box<dyn Error>> {
         match self {
             SyncAction::CopyFile {src, dest} => {
                 let _bytescopied = fs::copy(&src, &dest)?;
@@ -162,64 +162,72 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
     let (tx_a, rx_a) = channel();
     let (tx_b, rx_b) = channel();
 
-    // Automatically select the best implementation for your platform.
-    // You can also access each implementation directly e.g. INotifyWatcher.
-    // let mut watcher: RecommendedWatcher = (Watcher::new(tx, Duration::from_secs(2)))?;
     let mut watcher_a: PollWatcher = (Watcher::new(tx_a, Duration::from_secs(interval)))?;
     let mut watcher_b: PollWatcher = (Watcher::new(tx_b, Duration::from_secs(interval)))?;
 
-    // Add a path to be watched. All files and directories at that path and
-    // below will be monitored for changes.
     (watcher_a.watch(path_a, RecursiveMode::Recursive))?;
     (watcher_b.watch(path_b, RecursiveMode::Recursive))?;
 
-    // This is a simple loop, but you may want to use more complex logic here,
-    // for example to handle I/O.
     let delay = time::Duration::from_millis(1000);
-    let mut events_a = 0;
-    let mut events_b = 0;
+    //let mut events_a = 0;
+    //let mut events_b = 0;
     let mut action_queue_a = Vec::new();
-    //let mut action_queue_b = Vec::new();
+    let mut action_queue_b = Vec::new();
 
     loop {
         match rx_a.try_recv() {
             Ok(event) => {
-                events_a += 1;
                 match queue_actions(&mut action_queue_a, path_a, path_b, event) {
                     Ok(_) => {},
                     Err(e) => {
-                        println!("Run error {}", e);
+                        println!("Error adding to queue A {}", e);
                     }
                 }
             },
             Err(_e) => {
-                if events_a>0 {
-                    println!("Received {} events", events_a);
-                    println!("Actions {:?} events", action_queue_a);
-                    watcher_b.unwatch(path_b)?;
-                    events_a = 0; 
-                    action_queue_a.sort();
-                    for action in action_queue_a.drain(..) {
-                        match action.run() {
-                            Ok(_) => {},
-                            Err(e) => {
-                                println!("Run error {}", e);
-                            }
-                        }
-                    }
-                    watcher_b.watch(path_b, RecursiveMode::Recursive)?;
+                if action_queue_a.len()>0 {
+                    let _res = process_queue(&mut action_queue_a, path_b, &mut watcher_b);
                 }
-                //println!("watch error: {:?}", e);
-                //sleep(delay);
             },
         }
-        if events_a==0 && events_b==0 {
+        match rx_b.try_recv() {
+            Ok(event) => {
+                match queue_actions(&mut action_queue_b, path_b, path_a, event) {
+                    Ok(_) => {},
+                    Err(e) => {
+                        println!("Error adding to queue B {}", e);
+                    }
+                }
+            },
+            Err(_e) => {
+                if action_queue_b.len()>0 {
+                    let _res = process_queue(&mut action_queue_b, path_a, &mut watcher_a);
+                }
+            },
+        }
+        if action_queue_a.len()==0 && action_queue_b.len()==0 {
             sleep(delay);
         }
     }
 }
 
-fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &PathBuf, event: notify::DebouncedEvent) -> Result<(), Box<Error>> {
+fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>, target_path: &PathBuf , target_watcher: &mut T) -> Result<(), Box<dyn Error>> {
+    target_watcher.unwatch(target_path)?;
+    action_queue.sort();
+    for action in action_queue.drain(..) {
+        println!("Running {:?}", action);
+        match action.run() {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Run error {}, {:?}", e, action);
+            }
+        }
+    }
+    target_watcher.watch(target_path, RecursiveMode::Recursive)?;
+    Ok(())
+}
+
+fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &PathBuf, event: notify::DebouncedEvent) -> Result<(), Box<dyn Error>> {
     println!("{:?}", event);
     match event {
         notify::DebouncedEvent::Create(path) => {
@@ -237,7 +245,7 @@ fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &
         notify::DebouncedEvent::Write(path) => {
             if path.is_dir() {
                 println!("write dir");
-                action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+                //action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
             }
             else {
                 println!("write file");
