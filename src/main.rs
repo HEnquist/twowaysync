@@ -161,53 +161,107 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
     // Create a channel to receive the events.
     let (tx_a, rx_a) = channel();
     let (tx_b, rx_b) = channel();
+    let (tx_a_parent, rx_a_parent) = channel();
+    let (tx_b_parent, rx_b_parent) = channel();
 
     let mut watcher_a: PollWatcher = (Watcher::new(tx_a, Duration::from_secs(interval)))?;
     let mut watcher_b: PollWatcher = (Watcher::new(tx_b, Duration::from_secs(interval)))?;
+    let mut watcher_a_parent: PollWatcher = (Watcher::new(tx_a_parent, Duration::from_secs(interval/2)))?;
+    let mut watcher_b_parent: PollWatcher = (Watcher::new(tx_b_parent, Duration::from_secs(interval/2)))?;
 
     (watcher_a.watch(path_a, RecursiveMode::Recursive))?;
     (watcher_b.watch(path_b, RecursiveMode::Recursive))?;
+    (watcher_a_parent.watch(path_a, RecursiveMode::NonRecursive))?;
+    (watcher_b_parent.watch(path_b, RecursiveMode::NonRecursive))?;
 
     let delay = time::Duration::from_millis(1000);
     //let mut events_a = 0;
     //let mut events_b = 0;
     let mut action_queue_a = Vec::new();
     let mut action_queue_b = Vec::new();
+    let mut path_a_ok = true;
+    let mut path_b_ok = true;
+
 
     loop {
-        match rx_a.try_recv() {
-            Ok(event) => {
+        while let Ok(event) = rx_a_parent.try_recv() {
+            println!("DirA {:?}", event);
+            match event {
+                notify::DebouncedEvent::Error(_a,_b) => {
+                    if path_a_ok {
+                        println!("stop watching A due to error");
+                        let _res = watcher_a.unwatch(path_a);
+                        path_a_ok = false;
+                    }
+                },
+                notify::DebouncedEvent::Create(path) => {
+                    if &path == path_a {
+                        if !path_a_ok {
+                            println!("restart watching A");
+                            //clear event queues
+                            while let Ok(_) = rx_a.try_recv() {}
+                            action_queue_a.clear();
+                            watcher_a.watch(path_a, RecursiveMode::Recursive)?;
+                            path_a_ok = true;
+                        }
+                    } 
+                },
+                _ => {}
+            }
+        }
+        while let Ok(event) = rx_b_parent.try_recv() {
+            println!("DirB {:?}", event);
+            match event {
+                notify::DebouncedEvent::Error(_a,_b) => {
+                    if path_b_ok {
+                        println!("stop watching B due to error");
+                        let _res = watcher_b.unwatch(path_b);
+                        path_b_ok = false;
+                    }
+                },
+                notify::DebouncedEvent::Create(path) => {
+                    if &path == path_b {
+                        if !path_b_ok {
+                            println!("restart watching B");
+                            //clear event queues
+                            while let Ok(_) = rx_b.try_recv() {}
+                            action_queue_b.clear();
+                            watcher_b.watch(path_b, RecursiveMode::Recursive)?;
+                            path_b_ok = true;
+                        }
+                    } 
+                },
+                _ => {}
+            }
+        }
+        if path_a_ok {
+            while let Ok(event) = rx_a.try_recv() {
                 match queue_actions(&mut action_queue_a, path_a, path_b, event) {
                     Ok(_) => {},
                     Err(e) => {
                         println!("Error adding to queue A {}", e);
                     }
                 }
-            },
-            Err(_e) => {
-                if action_queue_a.len()>0 {
-                    let _res = process_queue(&mut action_queue_a, path_b, &mut watcher_b);
-                }
-            },
+            }
+            if action_queue_a.len()>0 && path_b_ok {
+                let _res = process_queue(&mut action_queue_a, path_b, &mut watcher_b);
+            }
         }
-        match rx_b.try_recv() {
-            Ok(event) => {
+        if path_b_ok {
+            while let Ok(event) = rx_b.try_recv() {
                 match queue_actions(&mut action_queue_b, path_b, path_a, event) {
                     Ok(_) => {},
                     Err(e) => {
                         println!("Error adding to queue B {}", e);
                     }
                 }
-            },
-            Err(_e) => {
-                if action_queue_b.len()>0 {
-                    let _res = process_queue(&mut action_queue_b, path_a, &mut watcher_a);
-                }
-            },
+            }
+            if action_queue_b.len()>0 && path_a_ok {
+                let _res = process_queue(&mut action_queue_b, path_a, &mut watcher_a);
+            }
         }
-        if action_queue_a.len()==0 && action_queue_b.len()==0 {
-            sleep(delay);
-        }
+        //if action_queue_a.len()==0 && action_queue_b.len()==0 {
+        sleep(delay);
     }
 }
 
