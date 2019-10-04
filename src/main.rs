@@ -40,6 +40,7 @@ impl Error for SyncError {
 enum SyncAction {
     CopyFile {src: PathBuf, dest: PathBuf},
     CopyDir {src: PathBuf, dest: PathBuf},
+    CopyLink {src: PathBuf, dest: PathBuf},
     CopyMeta {src: PathBuf, dest: PathBuf},
     Rename {src: PathBuf, dest: PathBuf},
     DeleteFile {src: PathBuf},
@@ -55,10 +56,11 @@ impl Prio for SyncAction {
         match self {
             &SyncAction::CopyFile {src: _, dest: _} => 2,
             &SyncAction::CopyDir {src: _, dest: _} => 1,
-            &SyncAction::CopyMeta {src: _, dest: _} => 6,
+            &SyncAction::CopyLink {src: _, dest: _} => 4,
+            &SyncAction::CopyMeta {src: _, dest: _} => 7,
             &SyncAction::Rename {src: _, dest: _} => 3,
-            &SyncAction::DeleteFile {src: _} => 4,
-            &SyncAction::DeleteDir {src: _} => 5,
+            &SyncAction::DeleteFile {src: _} => 5,
+            &SyncAction::DeleteDir {src: _} => 6,
         }
     }
 }
@@ -69,6 +71,7 @@ impl PartialEq for SyncAction {
             (&SyncAction::CopyFile {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyFile {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
+            | (&SyncAction::CopyLink {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyLink {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::Rename {src: ref src_a, dest: ref dest_a}, &SyncAction::Rename {src: ref src_b, dest: ref dest_b}) => {(src_a == src_b && dest_a == dest_b)},
             (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
             | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => (src_a == src_b),
@@ -81,6 +84,7 @@ impl Ord for SyncAction {
     fn cmp(&self, other: &SyncAction) -> Ordering {
         match (self, other) {
             (&SyncAction::CopyFile {src: ref src_a, dest: _}, &SyncAction::CopyFile {src: ref src_b, dest: _})
+            | (&SyncAction::CopyLink {src: ref src_a, dest: _}, &SyncAction::CopyLink {src: ref src_b, dest: _})
             | (&SyncAction::CopyDir {src: ref src_a, dest: _}, &SyncAction::CopyDir {src: ref src_b, dest: _}) => src_a.iter().count().cmp(&src_b.iter().count()),
             | (&SyncAction::CopyMeta {src: ref src_a, dest: _}, &SyncAction::CopyMeta {src: ref src_b, dest: _})
             | (&SyncAction::Rename {src: ref src_a, dest: _}, &SyncAction::Rename {src: ref src_b, dest: _}) => src_b.iter().count().cmp(&src_a.iter().count()),
@@ -105,6 +109,7 @@ impl fmt::Display for SyncAction {
             SyncAction::CopyFile {src, dest: _} => write!(f,"CopyFile: {}",src.display()),
             SyncAction::CopyDir {src, dest: _} => write!(f,"CopyDir: {}",src.display()),
             SyncAction::CopyMeta {src, dest: _} => write!(f,"CopyMeta: {}",src.display()),
+            SyncAction::CopyLink {src, dest: _} => write!(f,"CopyLink: {}",src.display()),
             SyncAction::Rename {src, dest} => write!(f,"Rename: {} -> {}",src.display(), dest.display()),
             SyncAction::DeleteFile {src} => write!(f,"DeleteFile: {}",src.display()),
             SyncAction::DeleteDir {src} => write!(f,"DeleteDir: {}",src.display()),
@@ -129,12 +134,18 @@ impl RunAction for SyncAction {
                 Ok(())
             },
             SyncAction::CopyMeta {src, dest} => {
-                let perms = fs::metadata(&src).unwrap().permissions();
+                let perms = fs::metadata(&src)?.permissions();
                 fs::set_permissions(&dest, perms)?;
-                let attr = fs::metadata(&src).unwrap();
+                let attr = fs::metadata(&src)?;
                 let mtime = FileTime::from_last_modification_time(&attr);
                 let atime = FileTime::from_last_access_time(&attr);
                 let _res = filetime::set_file_times(&dest, atime, mtime);
+                Ok(())
+            },
+            SyncAction::CopyLink {src, dest} => {
+                //let attr = fs::symlink_metadata(src)?;
+                let target = fs::read_link(src)?;
+                std::os::unix::fs::symlink(target, dest)?;
                 Ok(())
             },
             SyncAction::Rename {src, dest} => {
@@ -299,7 +310,11 @@ fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &
     println!("Event: {:?}", event);
     match event {
         notify::DebouncedEvent::Create(path) => {
-            if path.is_dir() {
+            let attr = fs::symlink_metadata(&path)?;
+            if attr.file_type().is_symlink() {
+                action_queue.push(SyncAction::CopyLink {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+            }
+            else if attr.is_dir() {
                 //println!("create dir");
                 action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
             }
