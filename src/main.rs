@@ -13,7 +13,21 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use walkdir::WalkDir;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+enum ChangeType {
+    Newer,
+    Older,
+    Created,
+    Deleted,
+}
+
+#[derive(Clone, Debug)]
+struct DiffItem {
+    diff: ChangeType,
+    ftype: FileType,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 enum FileType {
     File,
     Dir,
@@ -43,13 +57,6 @@ impl PartialEq for PathData {
 
 impl Eq for PathData {}
 
-#[derive(Clone, Debug)]
-struct DirDiff {
-    created: Vec<PathBuf>,
-    changed: Vec<PathBuf>,
-    outdated: Vec<PathBuf>,
-    deleted: Vec<PathBuf>,
-}
 
 #[derive(Debug)]
 struct SyncError {
@@ -201,6 +208,7 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
             .follow_links(false)
             .max_depth(depth)
             .into_iter()
+            .skip(1)
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
@@ -219,7 +227,7 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
                         FileType::File
                     };
 
-                    println!("insert {}",relpath.to_path_buf().display());
+                    //println!("insert {}",relpath.to_path_buf().display());
                     paths.insert(
                         relpath,
                         PathData {
@@ -239,39 +247,62 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
     })
 }
 
-fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> DirDiff {
-    let mut created = Vec::new();
-    let mut changed = Vec::new();
-    let mut outdated = Vec::new();
-    let mut deleted = Vec::new();
+fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> Result<HashMap<PathBuf, DiffItem>, Box<dyn Error>> {
+    let mut diffs = HashMap::new();
 
     let mut dir_b_copy = dir_b.clone();
     for (path, pathdata_a) in dir_a.contents.iter() {
         match dir_b.contents.get(path) {
             Some(pathdata_b) => {
                 if pathdata_a == pathdata_b {
-                    println!("{} found, identical", path.display());
+                    //println!("{} found, identical", path.display());
                 }
                 else if pathdata_a.mtime > pathdata_b.mtime {
-                    println!("{} found, A is newer", path.display());
+                    //println!("{} found, A is newer", path.display());
                     // copy A to B
-                    changed.push(path);
+                    diffs.insert(
+                        path.to_path_buf(),
+                        DiffItem {
+                            diff: ChangeType::Newer,
+                            ftype: pathdata_a.ftype,
+                        },
+                    );
                 }
                 else if pathdata_a.mtime < pathdata_b.mtime {
-                    println!("{} found, B is newer", path.display());
+                    //println!("{} found, B is newer", path.display());
                     // copy B to A
-                    outdated.push(path);
+                    diffs.insert(
+                        path.to_path_buf(),
+                        DiffItem {
+                            diff: ChangeType::Older,
+                            ftype: pathdata_a.ftype,
+                        },
+                    );
                 }
                 else {
-                    println!("{} found, different", path.display());
+                    //println!("{} found, different", path.display());
                     // mode changed
-                    changed.push(path);
+                    diffs.insert(
+                        path.to_path_buf(),
+                        DiffItem {
+                            diff: ChangeType::Newer,
+                            ftype: pathdata_a.ftype,
+                        },
+                    );
                 }
                 dir_b_copy.contents.remove(path);
             }
-            None => println!("{} is missing from B.", path.display())
-            // copy A to B
-            created.push(path);
+            None => {
+                //println!("{} is missing from B.", path.display());
+                // copy A to B
+                diffs.insert(
+                        path.to_path_buf(),
+                        DiffItem {
+                            diff: ChangeType::Created,
+                            ftype: pathdata_a.ftype,
+                        },
+                );
+            }
         }
     }
     for (path, pathdata_b) in dir_b_copy.contents.iter() {
@@ -280,18 +311,19 @@ fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> DirDiff {
                 println!("{} found in both, strange..", path.display());
             },
             None => {
-                println!("{} is missing from A.", path.display())
+                //println!("{} is missing from A.", path.display());
                 // copy B to A
-                deleted.push(path);
+                diffs.insert(
+                    path.to_path_buf(),
+                    DiffItem {
+                        diff: ChangeType::Deleted,
+                        ftype: pathdata_b.ftype,
+                    },
+                );
             }
         }
     }
-    DirDiff {
-        created: created,
-        changed: changed,
-        outdated: outdated,
-        deleted: deleted,
-    }
+    Ok(diffs)
 }
 
 
@@ -305,13 +337,31 @@ fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
 
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
 
-    let mut action_queue_a = Vec::new();
-    let mut action_queue_b = Vec::new();
+    let delay = time::Duration::from_millis(1000*interval);
+    let mut action_queue_a = Vec::<SyncAction>::new();
+    let mut action_queue_b = Vec::<SyncAction>::new();
     let mut path_a_ok = true;
     let mut path_b_ok = true;
 
+    let mut index_a = map_dir(path_a).unwrap();
+    let mut index_b = map_dir(path_b).unwrap();
+    let mut index_a_new: DirIndex;
+    let mut index_b_new: DirIndex;
+    let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    let mut diffs_b: HashMap<PathBuf, DiffItem>;
+    let diffs = compare_dirs(&index_a, &index_b).unwrap();
+    println!("diffs {:?}", diffs);
+
 
     loop {
+        index_a_new = map_dir(path_a).unwrap();
+        diffs_a = compare_dirs(&index_a_new, &index_a).unwrap();
+        index_a = index_a_new;
+        println!("A changes {:?}", diffs_a);
+        index_b_new = map_dir(path_b).unwrap();
+        diffs_b = compare_dirs(&index_b_new, &index_b).unwrap();
+        index_b = index_b_new;
+        println!("B changes {:?}", diffs_b);
         //check for changes in A and queue actions
         //check for changes in B and queue actions
         //check for conflicts
@@ -321,7 +371,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
         //if changes in B:
         //    process queue B
         //    update index B 
-        //sleep(delay);
+        sleep(delay);
     }
 }
 
