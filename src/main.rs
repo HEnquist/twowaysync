@@ -1,3 +1,5 @@
+extern crate rprompt;
+
 use std::time::{Duration, SystemTime};
 use std::env;
 use std::thread::sleep;
@@ -336,6 +338,14 @@ fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
 
 
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
+
+    let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
+    println!("Your reply is {}", reply);
+    match reply.as_str() {
+        "y" => println!("Yes"),
+        "n" => println!("No"),
+        _ => println!("----"),
+    }
 
     let delay = time::Duration::from_millis(1000*interval);
     let mut action_queue_a = Vec::<SyncAction>::new();
