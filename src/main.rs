@@ -1,7 +1,3 @@
-extern crate notify;
-
-use notify::{Watcher, RecursiveMode, PollWatcher};
-use std::sync::mpsc::channel;
 use std::time::Duration;
 use std::env;
 use std::thread::sleep;
@@ -12,6 +8,46 @@ use std::fs;
 use filetime::FileTime;
 use std::error::Error;
 use std::fmt;
+use std::os::unix::fs::PermissionsExt;
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+enum FileType {
+    File,
+    Dir,
+    Link,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PathData {
+    mtime: i64,
+    perms: u32,
+    size: u64,
+    ftype: FileType,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct DirIndex {
+    scantime: u64,
+    root: PathBuf,
+    contents: HashMap<PathBuf, PathData>,
+}
+
+impl PartialEq for PathData {
+    fn eq(&self, other: &PathData) -> bool {
+        self.mtime == other.mtime && self.perms == other.perms && self.size == other.size && self.ftype == other.ftype
+    }
+}
+
+impl Eq for PathData {}
+
+#[derive(Clone, Debug)]
+struct DirDiff {
+    created: Vec<PathBuf>,
+    changed: Vec<PathBuf>,
+    outdated: Vec<PathBuf>,
+    deleted: Vec<PathBuf>,
+}
 
 #[derive(Debug)]
 struct SyncError {
@@ -42,7 +78,6 @@ enum SyncAction {
     CopyDir {src: PathBuf, dest: PathBuf},
     CopyLink {src: PathBuf, dest: PathBuf},
     CopyMeta {src: PathBuf, dest: PathBuf},
-    Rename {src: PathBuf, dest: PathBuf},
     DeleteFile {src: PathBuf},
     DeleteDir {src: PathBuf},
 }
@@ -58,7 +93,6 @@ impl Prio for SyncAction {
             &SyncAction::CopyDir {src: _, dest: _} => 1,
             &SyncAction::CopyLink {src: _, dest: _} => 4,
             &SyncAction::CopyMeta {src: _, dest: _} => 7,
-            &SyncAction::Rename {src: _, dest: _} => 3,
             &SyncAction::DeleteFile {src: _} => 5,
             &SyncAction::DeleteDir {src: _} => 6,
         }
@@ -71,8 +105,7 @@ impl PartialEq for SyncAction {
             (&SyncAction::CopyFile {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyFile {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
-            | (&SyncAction::CopyLink {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyLink {src: ref src_b, dest: ref dest_b})
-            | (&SyncAction::Rename {src: ref src_a, dest: ref dest_a}, &SyncAction::Rename {src: ref src_b, dest: ref dest_b}) => {(src_a == src_b && dest_a == dest_b)},
+            | (&SyncAction::CopyLink {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyLink {src: ref src_b, dest: ref dest_b}) => {(src_a == src_b && dest_a == dest_b)},
             (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
             | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => (src_a == src_b),
             _ => false,
@@ -86,8 +119,7 @@ impl Ord for SyncAction {
             (&SyncAction::CopyFile {src: ref src_a, dest: _}, &SyncAction::CopyFile {src: ref src_b, dest: _})
             | (&SyncAction::CopyLink {src: ref src_a, dest: _}, &SyncAction::CopyLink {src: ref src_b, dest: _})
             | (&SyncAction::CopyDir {src: ref src_a, dest: _}, &SyncAction::CopyDir {src: ref src_b, dest: _}) => src_a.iter().count().cmp(&src_b.iter().count()),
-            | (&SyncAction::CopyMeta {src: ref src_a, dest: _}, &SyncAction::CopyMeta {src: ref src_b, dest: _})
-            | (&SyncAction::Rename {src: ref src_a, dest: _}, &SyncAction::Rename {src: ref src_b, dest: _}) => src_b.iter().count().cmp(&src_a.iter().count()),
+            (&SyncAction::CopyMeta {src: ref src_a, dest: _}, &SyncAction::CopyMeta {src: ref src_b, dest: _}) => src_b.iter().count().cmp(&src_a.iter().count()),
             (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
             | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => src_b.iter().count().cmp(&src_a.iter().count()),
             _ => self.prio().cmp(&other.prio()),
@@ -110,7 +142,6 @@ impl fmt::Display for SyncAction {
             SyncAction::CopyDir {src, dest: _} => write!(f,"CopyDir: {}",src.display()),
             SyncAction::CopyMeta {src, dest: _} => write!(f,"CopyMeta: {}",src.display()),
             SyncAction::CopyLink {src, dest: _} => write!(f,"CopyLink: {}",src.display()),
-            SyncAction::Rename {src, dest} => write!(f,"Rename: {} -> {}",src.display(), dest.display()),
             SyncAction::DeleteFile {src} => write!(f,"DeleteFile: {}",src.display()),
             SyncAction::DeleteDir {src} => write!(f,"DeleteDir: {}",src.display()),
         }
@@ -148,10 +179,6 @@ impl RunAction for SyncAction {
                 std::os::unix::fs::symlink(target, dest)?;
                 Ok(())
             },
-            SyncAction::Rename {src, dest} => {
-                fs::rename(&src, &dest)?;
-                Ok(())
-            },
             SyncAction::DeleteFile {src} => {
                 fs::remove_file(&src)?;
                 Ok(())
@@ -164,44 +191,115 @@ impl RunAction for SyncAction {
     }
 }
 
+fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
+    let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+    let mut paths = HashMap::new();
+    let depth = usize::max_value();
+    for entry in WalkDir::new(basepath.clone())
+            .follow_links(false)
+            .max_depth(depth)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            match entry.metadata() {
+                Err(e) => {}
+                Ok(m) => {
+                    let mtime = FileTime::from_last_modification_time(&m).seconds();
+                    let relpath = path.strip_prefix(basepath.to_str().unwrap_or(""))?.to_path_buf();
+                    let ftype = if m.file_type().is_dir() {
+                        FileType::Dir
+                    }
+                    else if m.file_type().is_symlink() {
+                        FileType::Link
+                    }
+                    else {
+                        FileType::File
+                    };
 
-
-fn translate_path(src_path: &PathBuf, src_base: &PathBuf, dest_base: &PathBuf) -> Result<(PathBuf), SyncError> {
-    let mut dest_path = dest_base.clone();
-    if src_path.starts_with(&src_base) {
-        for part in src_path.iter().skip(src_base.iter().count()) {
-            dest_path.push(part);
+                    println!("insert {}",relpath.to_path_buf().display());
+                    paths.insert(
+                        relpath,
+                        PathData {
+                            mtime: mtime,
+                            perms: m.permissions().mode(),
+                            size: m.len(),
+                            ftype: ftype,
+                        },
+                    );
+                }
+            }
         }
-        Ok(dest_path)
+    Ok(DirIndex {
+        scantime: current_time,
+        root: basepath.to_path_buf(),
+        contents: paths,
+    })
+}
+
+fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> DirDiff {
+    let mut created = Vec::new();
+    let mut changed = Vec::new();
+    let mut outdated = Vec::new();
+    let mut deleted = Vec::new();
+
+    let mut dir_b_copy = dir_b.clone();
+    for (path, pathdata_a) in dir_a.contents.iter() {
+        match dir_b.contents.get(path) {
+            Some(pathdata_b) => {
+                if pathdata_a == pathdata_b {
+                    println!("{} found, identical", path.display());
+                }
+                else if pathdata_a.mtime > pathdata_b.mtime {
+                    println!("{} found, A is newer", path.display());
+                    // copy A to B
+                    changed.push(path);
+                }
+                else if pathdata_a.mtime < pathdata_b.mtime {
+                    println!("{} found, B is newer", path.display());
+                    // copy B to A
+                    outdated.push(path);
+                }
+                else {
+                    println!("{} found, different", path.display());
+                    // mode changed
+                    changed.push(path);
+                }
+                dir_b_copy.contents.remove(path);
+            }
+            None => println!("{} is missing from B.", path.display())
+            // copy A to B
+            created.push(path);
+        }
     }
-    else {
-        Err(SyncError::new("bad path"))
+    for (path, pathdata_b) in dir_b_copy.contents.iter() {
+        match dir_a.contents.get(path) {
+            Some(pathdata_a) => {
+                println!("{} found in both, strange..", path.display());
+            }
+            None => println!("{} is missing from A.", path.display())
+            // copy B to A
+            deleted.push(path);
+        }
+    }
+    DirDiff {
+        created: created,
+        changed: changed,
+        outdated: outdated,
+        deleted: deleted,
     }
 }
 
 
+fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
+    let mut dest_path = root.clone();
+    dest_path.push(path);
+}
+
 
 
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()> {
-    // Create a channel to receive the events.
-    let (tx_a, rx_a) = channel();
-    let (tx_b, rx_b) = channel();
-    let (tx_a_parent, rx_a_parent) = channel();
-    let (tx_b_parent, rx_b_parent) = channel();
 
-    let mut watcher_a: PollWatcher = (Watcher::new(tx_a, Duration::from_secs(interval)))?;
-    let mut watcher_b: PollWatcher = (Watcher::new(tx_b, Duration::from_secs(interval)))?;
-    let mut watcher_a_parent: PollWatcher = (Watcher::new(tx_a_parent, Duration::from_secs(interval/2)))?;
-    let mut watcher_b_parent: PollWatcher = (Watcher::new(tx_b_parent, Duration::from_secs(interval/2)))?;
-
-    (watcher_a.watch(path_a, RecursiveMode::Recursive))?;
-    (watcher_b.watch(path_b, RecursiveMode::Recursive))?;
-    (watcher_a_parent.watch(path_a, RecursiveMode::NonRecursive))?;
-    (watcher_b_parent.watch(path_b, RecursiveMode::NonRecursive))?;
-
-    let delay = time::Duration::from_millis(1000);
-    //let mut events_a = 0;
-    //let mut events_b = 0;
     let mut action_queue_a = Vec::new();
     let mut action_queue_b = Vec::new();
     let mut path_a_ok = true;
@@ -209,89 +307,20 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
 
 
     loop {
-        while let Ok(event) = rx_a_parent.try_recv() {
-            println!("DirA {:?}", event);
-            match event {
-                notify::DebouncedEvent::Error(_a,_b) => {
-                    if path_a_ok {
-                        println!("stop watching A due to error");
-                        let _res = watcher_a.unwatch(path_a);
-                        path_a_ok = false;
-                    }
-                },
-                notify::DebouncedEvent::Create(path) => {
-                    if &path == path_a {
-                        if !path_a_ok {
-                            println!("restart watching A");
-                            //clear event queues
-                            while let Ok(_) = rx_a.try_recv() {}
-                            action_queue_a.clear();
-                            watcher_a.watch(path_a, RecursiveMode::Recursive)?;
-                            path_a_ok = true;
-                        }
-                    } 
-                },
-                _ => {}
-            }
-        }
-        while let Ok(event) = rx_b_parent.try_recv() {
-            println!("DirB {:?}", event);
-            match event {
-                notify::DebouncedEvent::Error(_a,_b) => {
-                    if path_b_ok {
-                        println!("stop watching B due to error");
-                        let _res = watcher_b.unwatch(path_b);
-                        path_b_ok = false;
-                    }
-                },
-                notify::DebouncedEvent::Create(path) => {
-                    if &path == path_b {
-                        if !path_b_ok {
-                            println!("restart watching B");
-                            //clear event queues
-                            while let Ok(_) = rx_b.try_recv() {}
-                            action_queue_b.clear();
-                            watcher_b.watch(path_b, RecursiveMode::Recursive)?;
-                            path_b_ok = true;
-                        }
-                    } 
-                },
-                _ => {}
-            }
-        }
-        if path_a_ok {
-            while let Ok(event) = rx_a.try_recv() {
-                match queue_actions(&mut action_queue_a, path_a, path_b, event) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        println!("Error adding to queue A {}", e);
-                    }
-                }
-            }
-            if action_queue_a.len()>0 && path_b_ok {
-                let _res = process_queue(&mut action_queue_a, path_b, &mut watcher_b);
-            }
-        }
-        if path_b_ok {
-            while let Ok(event) = rx_b.try_recv() {
-                match queue_actions(&mut action_queue_b, path_b, path_a, event) {
-                    Ok(_) => {},
-                    Err(e) => {
-                        println!("Error adding to queue B {}", e);
-                    }
-                }
-            }
-            if action_queue_b.len()>0 && path_a_ok {
-                let _res = process_queue(&mut action_queue_b, path_a, &mut watcher_a);
-            }
-        }
-        //if action_queue_a.len()==0 && action_queue_b.len()==0 {
+        //check for changes in A and queue actions
+        //check for changes in B and queue actions
+        //check for conflicts
+        //if changes in A:
+        //    process queue A
+        //    update index A 
+        //if changes in B:
+        //    process queue B
+        //    update index B 
         sleep(delay);
     }
 }
 
-fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>, target_path: &PathBuf , target_watcher: &mut T) -> Result<(), Box<dyn Error>> {
-    target_watcher.unwatch(target_path)?;
+fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
     action_queue.sort();
     for action in action_queue.drain(..) {
         println!("{}", action);
@@ -302,7 +331,6 @@ fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>, target_path: &P
             }
         }
     }
-    target_watcher.watch(target_path, RecursiveMode::Recursive)?;
     Ok(())
 }
 
