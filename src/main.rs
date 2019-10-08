@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use std::env;
 use std::thread::sleep;
 use std::time;
@@ -10,6 +10,8 @@ use std::error::Error;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
+use walkdir::WalkDir;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 enum FileType {
@@ -276,10 +278,12 @@ fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> DirDiff {
         match dir_a.contents.get(path) {
             Some(pathdata_a) => {
                 println!("{} found in both, strange..", path.display());
+            },
+            None => {
+                println!("{} is missing from A.", path.display())
+                // copy B to A
+                deleted.push(path);
             }
-            None => println!("{} is missing from A.", path.display())
-            // copy B to A
-            deleted.push(path);
         }
     }
     DirDiff {
@@ -294,11 +298,12 @@ fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> DirDiff {
 fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
     let mut dest_path = root.clone();
     dest_path.push(path);
+    dest_path
 }
 
 
 
-fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()> {
+fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
 
     let mut action_queue_a = Vec::new();
     let mut action_queue_b = Vec::new();
@@ -316,11 +321,11 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> notify::Result<()
         //if changes in B:
         //    process queue B
         //    update index B 
-        sleep(delay);
+        //sleep(delay);
     }
 }
 
-fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
+fn process_queue(action_queue: &mut Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
     action_queue.sort();
     for action in action_queue.drain(..) {
         println!("{}", action);
@@ -334,77 +339,77 @@ fn process_queue<T: Watcher>(action_queue: &mut Vec<SyncAction>) -> Result<(), B
     Ok(())
 }
 
-fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &PathBuf, event: notify::DebouncedEvent) -> Result<(), Box<dyn Error>> {
-    println!("Event: {:?}", event);
-    match event {
-        notify::DebouncedEvent::Create(path) => {
-            let attr = fs::symlink_metadata(&path)?;
-            if attr.file_type().is_symlink() {
-                action_queue.push(SyncAction::CopyLink {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            }
-            else if attr.is_dir() {
-                //println!("create dir");
-                action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            }
-            else {
-                //println!("create file");
-                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            }
-            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            Ok(())
-        },
-        notify::DebouncedEvent::Write(path) => {
-            if path.is_dir() {
-                //println!("write dir");
-                //action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            }
-            else {
-                //println!("write file");
-                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            }
-            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            Ok(())
-        },
-        notify::DebouncedEvent::NoticeWrite(_path) => {
-            //println!("notice write something");
-            Ok(())
-        },
-        notify::DebouncedEvent::NoticeRemove(_path) => {
-            //println!("notice write something");
-            Ok(())
-        },
-        notify::DebouncedEvent::Chmod(path) => {
-            //println!("chmod something");
-            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-            Ok(())
-        },
-        notify::DebouncedEvent::Remove(path) => {
-            if translate_path(&path, &path_a, &path_b)?.is_dir() {
-                //println!("delete dir");
-                action_queue.push(SyncAction::DeleteDir {src: translate_path(&path, &path_a, &path_b)?});
-            }
-            else {
-                //println!("delete file");
-                action_queue.push(SyncAction::DeleteFile {src: translate_path(&path, &path_a, &path_b)?});
-            }
-            Ok(())
-        },
-        notify::DebouncedEvent::Rename(path_src, path_dest) => {
-            //println!("rename something");
-            action_queue.push(SyncAction::Rename {src: translate_path(&path_src, &path_a, &path_b)?, dest: translate_path(&path_dest, &path_a, &path_b)?});
-            action_queue.push(SyncAction::CopyMeta {src: path_dest.clone(), dest: translate_path(&path_dest, &path_a, &path_b)?});
-            Ok(())
-        },
-        notify::DebouncedEvent::Rescan => {
-            //println!("rescan");
-            Ok(())
-        },
-        notify::DebouncedEvent::Error(_a,_b) => {
-            //println!("error");
-            Ok(())
-        }
-    }
-}
+//fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &PathBuf, event: notify::DebouncedEvent) -> Result<(), Box<dyn Error>> {
+//    println!("Event: {:?}", event);
+//    match event {
+//        notify::DebouncedEvent::Create(path) => {
+//            let attr = fs::symlink_metadata(&path)?;
+//            if attr.file_type().is_symlink() {
+//                action_queue.push(SyncAction::CopyLink {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            else if attr.is_dir() {
+//                //println!("create dir");
+//                action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            else {
+//                //println!("create file");
+//                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Write(path) => {
+//            if path.is_dir() {
+//                //println!("write dir");
+//                //action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            else {
+//                //println!("write file");
+//                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::NoticeWrite(_path) => {
+//            //println!("notice write something");
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::NoticeRemove(_path) => {
+//            //println!("notice write something");
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Chmod(path) => {
+//            //println!("chmod something");
+//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Remove(path) => {
+//            if translate_path(&path, &path_a, &path_b)?.is_dir() {
+//                //println!("delete dir");
+//                action_queue.push(SyncAction::DeleteDir {src: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            else {
+//                //println!("delete file");
+//                action_queue.push(SyncAction::DeleteFile {src: translate_path(&path, &path_a, &path_b)?});
+//            }
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Rename(path_src, path_dest) => {
+//            //println!("rename something");
+//            action_queue.push(SyncAction::Rename {src: translate_path(&path_src, &path_a, &path_b)?, dest: translate_path(&path_dest, &path_a, &path_b)?});
+//            action_queue.push(SyncAction::CopyMeta {src: path_dest.clone(), dest: translate_path(&path_dest, &path_a, &path_b)?});
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Rescan => {
+//            //println!("rescan");
+//            Ok(())
+//        },
+//        notify::DebouncedEvent::Error(_a,_b) => {
+//            //println!("error");
+//            Ok(())
+//        }
+//    }
+//}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -412,9 +417,7 @@ fn main() {
     let path_b = PathBuf::from(&args[2]).canonicalize().unwrap();
     let interval: u64 = args[3].parse().unwrap();
 
-    if let Err(e) = watch(&path_a, &path_b, interval) {
-        println!("error: {:?}", e)
-    }
+    watch(&path_a, &path_b, interval);
 }
 
 
