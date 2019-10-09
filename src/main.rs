@@ -1,5 +1,6 @@
 extern crate rprompt;
 
+use std::process;
 use std::time::{Duration, SystemTime};
 use std::env;
 use std::thread::sleep;
@@ -406,77 +407,6 @@ fn load_index(path: &PathBuf) -> Result<(DirIndex), Box<dyn Error>> {
     Ok(idx)
 }
 
-fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dyn Error>> {
-
-    //let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
-    //println!("Your reply is {}", reply);
-    //match reply.as_str() {
-    //    "y" => println!("Yes"),
-    //    "n" => println!("No"),
-    //    _ => println!("----"),
-    //}
-
-    let delay = Duration::from_millis(1000*interval);
-
-    let mut index_a: DirIndex;
-    let mut index_b: DirIndex;
-    let mut index_a_new: DirIndex;
-    let mut index_b_new: DirIndex;
-
-    let mut diffs_a: HashMap<PathBuf, DiffItem>;
-    let mut diffs_b: HashMap<PathBuf, DiffItem>;
-
-    match (load_index(path_a), load_index(path_b)) {
-        (Ok(idx_a), Ok(idx_b)) => {
-            index_a = idx_a;
-            index_b = idx_b;
-        }
-        _ => {
-            index_a = map_dir(path_a)?;
-            index_b = map_dir(path_b)?;
-            println!("No index found, updating B to match A");
-            let diffs = compare_dirs(&index_a, &index_b)?;
-            sync_diffs(&diffs, path_a, path_b)?;
-            index_a = map_dir(path_a)?;
-            index_b = map_dir(path_b)?;
-            save_index(&index_a, &path_a)?;
-            save_index(&index_b, &path_b)?;
-
-        }
-    }
-
-    //let mut index_a = map_dir(path_a).unwrap();
-    //let mut index_b = map_dir(path_b).unwrap();
-    //
-    //let mut diffs_a: HashMap<PathBuf, DiffItem>;
-    //let mut diffs_b: HashMap<PathBuf, DiffItem>;
-    //let diffs = compare_dirs(&index_a, &index_b).unwrap();
-    //println!("diffs {:?}", diffs);
-
-
-    loop {
-        if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
-            index_a_new = map_dir(path_a)?;
-            diffs_a = compare_dirs(&index_a_new, &index_a)?;
-            index_b_new = map_dir(path_b)?;
-            diffs_b = compare_dirs(&index_b_new, &index_b)?;
-            if !diffs_a.is_empty() || !diffs_b.is_empty() {
-                solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                sync_diffs(&diffs_a, path_a, path_b)?;
-                sync_diffs(&diffs_b, path_b, path_a)?;
-                index_a = map_dir(path_a)?;
-                index_b = map_dir(path_b)?;
-                save_index(&index_a, &path_a)?;
-                save_index(&index_b, &path_b)?;
-            }
-        }
-        else {
-            println!("One directory not available!");
-        }
-        sleep(delay);
-    }
-}
-
 fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
     action_queue.sort();
     for action in action_queue.drain(..) {
@@ -542,6 +472,88 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
     Ok(())
 }
 
+// Main loop
+fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dyn Error>> {
+
+    //let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
+    //println!("Your reply is {}", reply);
+    //match reply.as_str() {
+    //    "y" => println!("Yes"),
+    //    "n" => println!("No"),
+    //    _ => println!("----"),
+    //}
+
+    let delay = Duration::from_millis(1000*interval);
+
+    let mut index_a: DirIndex;
+    let mut index_b: DirIndex;
+    let mut index_a_new: DirIndex;
+    let mut index_b_new: DirIndex;
+
+    let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    let mut diffs_b: HashMap<PathBuf, DiffItem>;
+
+    match (load_index(path_a), load_index(path_b)) {
+        (Ok(idx_a), Ok(idx_b)) => {
+            index_a = idx_a;
+            index_b = idx_b;
+        }
+        _ => {
+            index_a = map_dir(path_a)?;
+            index_b = map_dir(path_b)?;
+            println!("No index found, updating B to match A");
+            println!("This will copy everything from\n{}\nto\n{}", path_a.display(), path_b.display());
+            let reply = rprompt::prompt_reply_stdout("Proceed? y or n: ").unwrap();
+            match reply.as_str() {
+                "y" => println!("Syncing..."),
+                _ => {
+                    println!("Exiting");
+                    process::exit(0);
+                }
+            }
+
+            let diffs = compare_dirs(&index_a, &index_b)?;
+            sync_diffs(&diffs, path_a, path_b)?;
+            index_a = map_dir(path_a)?;
+            index_b = map_dir(path_b)?;
+            save_index(&index_a, &path_a)?;
+            save_index(&index_b, &path_b)?;
+            println!("Done");
+
+        }
+    }
+
+    //let mut index_a = map_dir(path_a).unwrap();
+    //let mut index_b = map_dir(path_b).unwrap();
+    //
+    //let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    //let mut diffs_b: HashMap<PathBuf, DiffItem>;
+    //let diffs = compare_dirs(&index_a, &index_b).unwrap();
+    //println!("diffs {:?}", diffs);
+
+
+    loop {
+        if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
+            index_a_new = map_dir(path_a)?;
+            diffs_a = compare_dirs(&index_a_new, &index_a)?;
+            index_b_new = map_dir(path_b)?;
+            diffs_b = compare_dirs(&index_b_new, &index_b)?;
+            if !diffs_a.is_empty() || !diffs_b.is_empty() {
+                solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                sync_diffs(&diffs_a, path_a, path_b)?;
+                sync_diffs(&diffs_b, path_b, path_a)?;
+                index_a = map_dir(path_a)?;
+                index_b = map_dir(path_b)?;
+                save_index(&index_a, &path_a)?;
+                save_index(&index_b, &path_b)?;
+            }
+        }
+        else {
+            println!("One directory not available!");
+        }
+        sleep(delay);
+    }
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
