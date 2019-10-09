@@ -3,7 +3,6 @@ extern crate rprompt;
 use std::time::{Duration, SystemTime};
 use std::env;
 use std::thread::sleep;
-use std::time;
 use std::path::PathBuf;
 use std::cmp::Ordering;
 use std::fs;
@@ -64,28 +63,7 @@ impl PartialEq for PathData {
 impl Eq for PathData {}
 
 
-#[derive(Debug)]
-struct SyncError {
-    details: String
-}
 
-impl SyncError {
-    fn new(msg: &str) -> SyncError {
-        SyncError{details: msg.to_string()}
-    }
-}
-
-impl fmt::Display for SyncError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"{}",self.details)
-    }
-}
-
-impl Error for SyncError {
-    fn description(&self) -> &str {
-        &self.details
-    }
-}
 
 #[derive(Debug)]
 enum SyncAction {
@@ -201,6 +179,9 @@ impl RunAction for SyncAction {
             SyncAction::CopyLink {src, dest} => {
                 //let attr = fs::symlink_metadata(src)?;
                 let target = fs::read_link(src)?;
+                if fs::symlink_metadata(dest).is_ok() {
+                    fs::remove_file(&dest)?;
+                }
                 std::os::unix::fs::symlink(target, dest)?;
                 Ok(())
             },
@@ -340,7 +321,7 @@ fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBu
     }
     for (path, pathdata_ref) in dir_ref_copy.contents.iter() {
         match dir_new.contents.get(path) {
-            Some(pathdata_new) => {
+            Some(_pathdata_new) => {
                 println!("{} found in both, strange..", path.display());
             },
             None => {
@@ -436,10 +417,6 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dy
     //}
 
     let delay = Duration::from_millis(1000*interval);
-    let mut action_queue_a = Vec::<SyncAction>::new();
-    let mut action_queue_b = Vec::<SyncAction>::new();
-    let mut path_a_ok = true;
-    let mut path_b_ok = true;
 
     let mut index_a: DirIndex;
     let mut index_b: DirIndex;
@@ -498,7 +475,6 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dy
         }
         sleep(delay);
     }
-    Ok(())
 }
 
 fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
