@@ -7,6 +7,8 @@ use std::time;
 use std::path::PathBuf;
 use std::cmp::Ordering;
 use std::fs;
+use std::fs::File;
+use std::io::{Write, Read};
 use filetime::FileTime;
 use std::error::Error;
 use std::fmt;
@@ -21,12 +23,14 @@ enum ChangeType {
     Older,
     Created,
     Deleted,
+    Modified,
 }
 
 #[derive(Clone, Debug)]
 struct DiffItem {
     diff: ChangeType,
     ftype: FileType,
+    mtime: i64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -89,8 +93,8 @@ enum SyncAction {
     CopyDir {src: PathBuf, dest: PathBuf},
     CopyLink {src: PathBuf, dest: PathBuf},
     CopyMeta {src: PathBuf, dest: PathBuf},
-    DeleteFile {src: PathBuf},
-    DeleteDir {src: PathBuf},
+    DeleteFile {dest: PathBuf},
+    DeleteDir {dest: PathBuf},
 }
 
 trait Prio {
@@ -104,8 +108,8 @@ impl Prio for SyncAction {
             &SyncAction::CopyDir {src: _, dest: _} => 1,
             &SyncAction::CopyLink {src: _, dest: _} => 4,
             &SyncAction::CopyMeta {src: _, dest: _} => 7,
-            &SyncAction::DeleteFile {src: _} => 5,
-            &SyncAction::DeleteDir {src: _} => 6,
+            &SyncAction::DeleteFile {dest: _} => 5,
+            &SyncAction::DeleteDir {dest: _} => 6,
         }
     }
 }
@@ -117,8 +121,8 @@ impl PartialEq for SyncAction {
             | (&SyncAction::CopyDir {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyDir {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyMeta {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyMeta {src: ref src_b, dest: ref dest_b})
             | (&SyncAction::CopyLink {src: ref src_a, dest: ref dest_a}, &SyncAction::CopyLink {src: ref src_b, dest: ref dest_b}) => {(src_a == src_b && dest_a == dest_b)},
-            (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
-            | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => (src_a == src_b),
+            (&SyncAction::DeleteFile {dest: ref dest_a}, &SyncAction::DeleteFile {dest: ref dest_b})
+            | (&SyncAction::DeleteDir {dest: ref dest_a}, &SyncAction::DeleteDir {dest: ref dest_b}) => (dest_a == dest_b),
             _ => false,
         }
     }
@@ -131,8 +135,8 @@ impl Ord for SyncAction {
             | (&SyncAction::CopyLink {src: ref src_a, dest: _}, &SyncAction::CopyLink {src: ref src_b, dest: _})
             | (&SyncAction::CopyDir {src: ref src_a, dest: _}, &SyncAction::CopyDir {src: ref src_b, dest: _}) => src_a.iter().count().cmp(&src_b.iter().count()),
             (&SyncAction::CopyMeta {src: ref src_a, dest: _}, &SyncAction::CopyMeta {src: ref src_b, dest: _}) => src_b.iter().count().cmp(&src_a.iter().count()),
-            (&SyncAction::DeleteFile {src: ref src_a}, &SyncAction::DeleteFile {src: ref src_b})
-            | (&SyncAction::DeleteDir {src: ref src_a}, &SyncAction::DeleteDir {src: ref src_b}) => src_b.iter().count().cmp(&src_a.iter().count()),
+            (&SyncAction::DeleteFile {dest: ref dest_a}, &SyncAction::DeleteFile {dest: ref dest_b})
+            | (&SyncAction::DeleteDir {dest: ref dest_a}, &SyncAction::DeleteDir {dest: ref dest_b}) => dest_b.iter().count().cmp(&dest_a.iter().count()),
             _ => self.prio().cmp(&other.prio()),
         }
     }
@@ -153,8 +157,8 @@ impl fmt::Display for SyncAction {
             SyncAction::CopyDir {src, dest: _} => write!(f,"CopyDir: {}",src.display()),
             SyncAction::CopyMeta {src, dest: _} => write!(f,"CopyMeta: {}",src.display()),
             SyncAction::CopyLink {src, dest: _} => write!(f,"CopyLink: {}",src.display()),
-            SyncAction::DeleteFile {src} => write!(f,"DeleteFile: {}",src.display()),
-            SyncAction::DeleteDir {src} => write!(f,"DeleteDir: {}",src.display()),
+            SyncAction::DeleteFile {dest} => write!(f,"DeleteFile: {}",dest.display()),
+            SyncAction::DeleteDir {dest} => write!(f,"DeleteDir: {}",dest.display()),
         }
     }
 }
@@ -190,19 +194,19 @@ impl RunAction for SyncAction {
                 std::os::unix::fs::symlink(target, dest)?;
                 Ok(())
             },
-            SyncAction::DeleteFile {src} => {
-                fs::remove_file(&src)?;
+            SyncAction::DeleteFile {dest} => {
+                fs::remove_file(&dest)?;
                 Ok(())
             },
-            SyncAction::DeleteDir {src} => {
-                fs::remove_dir(&src)?;
+            SyncAction::DeleteDir {dest} => {
+                fs::remove_dir(&dest)?;
                 Ok(())
             }
         }
     }
 }
 
-fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
+fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let mut paths = HashMap::new();
     let depth = usize::max_value();
@@ -215,7 +219,7 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
         {
             let path = entry.path();
             match entry.metadata() {
-                Err(e) => {}
+                Err(_) => {}
                 Ok(m) => {
                     let mtime = FileTime::from_last_modification_time(&m).seconds();
                     let relpath = path.strip_prefix(basepath.to_str().unwrap_or(""))?.to_path_buf();
@@ -249,77 +253,78 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<Error>> {
     })
 }
 
-fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> Result<HashMap<PathBuf, DiffItem>, Box<dyn Error>> {
+fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBuf, DiffItem>, Box<dyn Error>> {
     let mut diffs = HashMap::new();
 
-    let mut dir_b_copy = dir_b.clone();
-    for (path, pathdata_a) in dir_a.contents.iter() {
-        match dir_b.contents.get(path) {
-            Some(pathdata_b) => {
-                if pathdata_a == pathdata_b {
+    let mut dir_ref_copy = dir_ref.clone();
+    for (path, pathdata_new) in dir_new.contents.iter() {
+        match dir_ref.contents.get(path) {
+            Some(pathdata_ref) => {
+                if pathdata_new == pathdata_ref {
                     //println!("{} found, identical", path.display());
                 }
-                else if pathdata_a.mtime > pathdata_b.mtime {
-                    //println!("{} found, A is newer", path.display());
-                    // copy A to B
+                else if pathdata_new.mtime > pathdata_ref.mtime {
+                    //println!("{} found, N is newer", path.display());
                     diffs.insert(
                         path.to_path_buf(),
                         DiffItem {
                             diff: ChangeType::Newer,
-                            ftype: pathdata_a.ftype,
+                            ftype: pathdata_new.ftype,
+                            mtime: pathdata_new.mtime,
                         },
                     );
                 }
-                else if pathdata_a.mtime < pathdata_b.mtime {
-                    //println!("{} found, B is newer", path.display());
-                    // copy B to A
+                else if pathdata_new.mtime < pathdata_ref.mtime {
+                    //println!("{} found, R is newer", path.display());
                     diffs.insert(
                         path.to_path_buf(),
                         DiffItem {
                             diff: ChangeType::Older,
-                            ftype: pathdata_a.ftype,
+                            ftype: pathdata_new.ftype,
+                            mtime: pathdata_new.mtime,
                         },
                     );
                 }
                 else {
                     //println!("{} found, different", path.display());
-                    // mode changed
+                    // mode (or size, unlikely) changed
                     diffs.insert(
                         path.to_path_buf(),
                         DiffItem {
-                            diff: ChangeType::Newer,
-                            ftype: pathdata_a.ftype,
+                            diff: ChangeType::Modified,
+                            ftype: pathdata_new.ftype,
+                            mtime: pathdata_new.mtime,
                         },
                     );
                 }
-                dir_b_copy.contents.remove(path);
+                dir_ref_copy.contents.remove(path);
             }
             None => {
-                //println!("{} is missing from B.", path.display());
-                // copy A to B
+                //println!("{} is missing from R.", path.display());
                 diffs.insert(
                         path.to_path_buf(),
                         DiffItem {
                             diff: ChangeType::Created,
-                            ftype: pathdata_a.ftype,
+                            ftype: pathdata_new.ftype,
+                            mtime: pathdata_new.mtime,
                         },
                 );
             }
         }
     }
-    for (path, pathdata_b) in dir_b_copy.contents.iter() {
-        match dir_a.contents.get(path) {
-            Some(pathdata_a) => {
+    for (path, pathdata_ref) in dir_ref_copy.contents.iter() {
+        match dir_new.contents.get(path) {
+            Some(pathdata_new) => {
                 println!("{} found in both, strange..", path.display());
             },
             None => {
-                //println!("{} is missing from A.", path.display());
-                // copy B to A
+                //println!("{} is missing from N.", path.display());
                 diffs.insert(
                     path.to_path_buf(),
                     DiffItem {
                         diff: ChangeType::Deleted,
-                        ftype: pathdata_b.ftype,
+                        ftype: pathdata_ref.ftype,
+                        mtime: pathdata_ref.mtime,
                     },
                 );
             }
@@ -328,6 +333,46 @@ fn compare_dirs(dir_a: &DirIndex, dir_b: &DirIndex) -> Result<HashMap<PathBuf, D
     Ok(diffs)
 }
 
+fn solve_conflicts(diff_master: &mut HashMap<PathBuf, DiffItem>, diff_copy: &mut HashMap<PathBuf, DiffItem>) -> Result<(), Box<dyn Error>> {
+    for (path, diffitem_master) in diff_master.clone().iter() {
+        match diff_copy.get(path) {
+            Some(diffitem_copy) => {
+                match (&diffitem_master.diff, &diffitem_copy.diff) {
+                    (ChangeType::Newer, ChangeType::Newer)
+                    | (ChangeType::Newer, ChangeType::Older)
+                    | (ChangeType::Older, ChangeType::Newer)
+                    | (ChangeType::Older, ChangeType::Older)
+                    | (ChangeType::Created, ChangeType::Created) => {
+                        //check which is newer, remove oldest
+                        if diffitem_master.mtime >= diffitem_copy.mtime {
+                            diff_copy.remove(path);
+                        }
+                        else {
+                            diff_master.remove(path);
+                        }
+                    },
+                    (ChangeType::Deleted, ChangeType::Deleted) => {
+                        //fine, remove both
+                        diff_copy.remove(path);
+                        diff_master.remove(path);
+                    },
+                    (ChangeType::Modified, ChangeType::Modified)
+                    | (ChangeType::Newer, _) => {
+                        //keep master 
+                        diff_copy.remove(path);
+                    }
+                    (_, ChangeType::Newer) => {
+                        //keep copy
+                        diff_master.remove(path);
+                    },
+                    _ => {},
+                }
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
 
 fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
     let mut dest_path = root.clone();
@@ -335,7 +380,24 @@ fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
     dest_path
 }
 
+fn save_index(idx: &DirIndex, path: &PathBuf) -> Result<(), Box<dyn Error>> {
+    let serialized = serde_json::to_string(&idx)?;
+    let mut jsonpath = PathBuf::from(path);
+    jsonpath.push(".twoway.json");
+    let mut jsonfile = File::create(jsonpath)?;
+    jsonfile.write_all(serialized.as_bytes())?;
+    Ok(())
+}
 
+fn load_index(path: &PathBuf) -> Result<(DirIndex), Box<dyn Error>> {
+    let mut jsonpath = PathBuf::from(path);
+    jsonpath.push(".twoway.json");
+    let mut jsonfile = File::open(jsonpath)?;
+    let mut contents = String::new();
+    jsonfile.read_to_string(&mut contents)?;
+    let idx: DirIndex = serde_json::from_str(&contents)?;
+    Ok(idx)
+}
 
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
 
@@ -347,16 +409,37 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
         _ => println!("----"),
     }
 
-    let delay = time::Duration::from_millis(1000*interval);
+    let delay = Duration::from_millis(1000*interval);
     let mut action_queue_a = Vec::<SyncAction>::new();
     let mut action_queue_b = Vec::<SyncAction>::new();
     let mut path_a_ok = true;
     let mut path_b_ok = true;
 
-    let mut index_a = map_dir(path_a).unwrap();
-    let mut index_b = map_dir(path_b).unwrap();
+    let mut index_a: DirIndex;
+    let mut index_b: DirIndex;
     let mut index_a_new: DirIndex;
     let mut index_b_new: DirIndex;
+
+    let i_a = load_index(path_a);
+    let i_b = load_index(path_b);
+    match (i_a, i_b) {
+        (Ok(idx_a), Ok(idx_b)) => {
+            index_a = idx_a;
+            index_b = idx_b;
+        }
+        _ => {
+            index_a = map_dir(path_a).unwrap();
+            index_b = map_dir(path_b).unwrap();
+            println!("No index found, updating B to match A");
+            let diffs = compare_dirs(&index_a, &index_b).unwrap();
+            sync_diffs(&diffs, path_a, path_b).unwrap();
+
+        }
+    }
+
+    let mut index_a = map_dir(path_a).unwrap();
+    let mut index_b = map_dir(path_b).unwrap();
+    
     let mut diffs_a: HashMap<PathBuf, DiffItem>;
     let mut diffs_b: HashMap<PathBuf, DiffItem>;
     let diffs = compare_dirs(&index_a, &index_b).unwrap();
@@ -385,7 +468,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
     }
 }
 
-fn process_queue(action_queue: &mut Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
+fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
     action_queue.sort();
     for action in action_queue.drain(..) {
         println!("{}", action);
@@ -399,77 +482,57 @@ fn process_queue(action_queue: &mut Vec<SyncAction>) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-//fn queue_actions(action_queue: &mut Vec<SyncAction>, path_a: &PathBuf, path_b: &PathBuf, event: notify::DebouncedEvent) -> Result<(), Box<dyn Error>> {
-//    println!("Event: {:?}", event);
-//    match event {
-//        notify::DebouncedEvent::Create(path) => {
-//            let attr = fs::symlink_metadata(&path)?;
-//            if attr.file_type().is_symlink() {
-//                action_queue.push(SyncAction::CopyLink {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            else if attr.is_dir() {
-//                //println!("create dir");
-//                action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            else {
-//                //println!("create file");
-//                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Write(path) => {
-//            if path.is_dir() {
-//                //println!("write dir");
-//                //action_queue.push(SyncAction::CopyDir {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            else {
-//                //println!("write file");
-//                action_queue.push(SyncAction::CopyFile {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::NoticeWrite(_path) => {
-//            //println!("notice write something");
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::NoticeRemove(_path) => {
-//            //println!("notice write something");
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Chmod(path) => {
-//            //println!("chmod something");
-//            action_queue.push(SyncAction::CopyMeta {src: path.clone(), dest: translate_path(&path, &path_a, &path_b)?});
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Remove(path) => {
-//            if translate_path(&path, &path_a, &path_b)?.is_dir() {
-//                //println!("delete dir");
-//                action_queue.push(SyncAction::DeleteDir {src: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            else {
-//                //println!("delete file");
-//                action_queue.push(SyncAction::DeleteFile {src: translate_path(&path, &path_a, &path_b)?});
-//            }
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Rename(path_src, path_dest) => {
-//            //println!("rename something");
-//            action_queue.push(SyncAction::Rename {src: translate_path(&path_src, &path_a, &path_b)?, dest: translate_path(&path_dest, &path_a, &path_b)?});
-//            action_queue.push(SyncAction::CopyMeta {src: path_dest.clone(), dest: translate_path(&path_dest, &path_a, &path_b)?});
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Rescan => {
-//            //println!("rescan");
-//            Ok(())
-//        },
-//        notify::DebouncedEvent::Error(_a,_b) => {
-//            //println!("error");
-//            Ok(())
-//        }
-//    }
-//}
+fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: &PathBuf) -> Result<(), Box<dyn Error>> {
+    let mut actions = Vec::<SyncAction>::new();
+    for (path, diffitem) in diff.iter() {
+        match diffitem.diff {
+            ChangeType::Newer 
+            | ChangeType::Created
+            | ChangeType::Modified => {
+                match diffitem.ftype {
+                    FileType::Link => {
+                        actions.push(SyncAction::CopyLink {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                    },
+                    FileType::Dir => {
+                        actions.push(SyncAction::CopyDir {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                    },
+                    FileType::File => {
+                        actions.push(SyncAction::CopyFile {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                    },
+                }
+                actions.push(SyncAction::CopyMeta {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+            },
+            ChangeType::Deleted => {
+                match diffitem.ftype {
+                    FileType::Dir => {
+                        actions.push(SyncAction::DeleteDir {dest: translate_path(path, path_dest)});
+                    },
+                    _ => {
+                        actions.push(SyncAction::DeleteFile {dest: translate_path(path, path_dest)});
+                    },
+                }
+            },
+            ChangeType::Older => {
+                match diffitem.ftype {
+                    FileType::Link => {
+                        actions.push(SyncAction::CopyLink {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                    },
+                    FileType::Dir => {
+                        actions.push(SyncAction::CopyDir {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                    },
+                    FileType::File => {
+                        actions.push(SyncAction::CopyFile {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                    },
+                }
+                actions.push(SyncAction::CopyMeta {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+
+            },
+        }
+    }
+    process_queue(actions)?;
+    Ok(())
+}
+
 
 fn main() {
     let args: Vec<String> = env::args().collect();
