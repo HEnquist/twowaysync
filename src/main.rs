@@ -172,11 +172,21 @@ impl RunAction for SyncAction {
     fn run(&self) -> Result<(), Box<dyn Error>> {
         match self {
             SyncAction::CopyFile {src, dest} => {
+                if fs::metadata(&dest).is_ok() {
+                    let mut perms = fs::metadata(&dest)?.permissions();
+                    let readonly = perms.readonly();
+                    if readonly {
+                        perms.set_readonly(false);
+                        fs::set_permissions(&dest, perms)?;
+                    }
+                }
                 let _bytescopied = fs::copy(&src, &dest)?;
                 Ok(())
             },
             SyncAction::CopyDir {src: _, dest} => {
-                fs::create_dir(&dest)?;
+                if !fs::metadata(&dest).is_ok() { 
+                    fs::create_dir(&dest)?;
+                }
                 Ok(())
             },
             SyncAction::CopyMeta {src, dest} => {
@@ -195,10 +205,22 @@ impl RunAction for SyncAction {
                 Ok(())
             },
             SyncAction::DeleteFile {dest} => {
+                let mut perms = fs::metadata(&dest)?.permissions();
+                let readonly = perms.readonly();
+                if readonly {
+                    perms.set_readonly(false);
+                    fs::set_permissions(&dest, perms)?;
+                }
                 fs::remove_file(&dest)?;
                 Ok(())
             },
             SyncAction::DeleteDir {dest} => {
+                let mut perms = fs::metadata(&dest)?.permissions();
+                let readonly = perms.readonly();
+                if readonly {
+                    perms.set_readonly(false);
+                    fs::set_permissions(&dest, perms)?;
+                }
                 fs::remove_dir(&dest)?;
                 Ok(())
             }
@@ -246,6 +268,10 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
                 }
             }
         }
+    let jsonpath = PathBuf::from(".twoway.json");
+    if paths.contains_key(&jsonpath) {
+        paths.remove(&jsonpath).unwrap();
+    }
     Ok(DirIndex {
         scantime: current_time,
         root: basepath.to_path_buf(),
@@ -399,15 +425,15 @@ fn load_index(path: &PathBuf) -> Result<(DirIndex), Box<dyn Error>> {
     Ok(idx)
 }
 
-fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
+fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dyn Error>> {
 
-    let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
-    println!("Your reply is {}", reply);
-    match reply.as_str() {
-        "y" => println!("Yes"),
-        "n" => println!("No"),
-        _ => println!("----"),
-    }
+    //let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
+    //println!("Your reply is {}", reply);
+    //match reply.as_str() {
+    //    "y" => println!("Yes"),
+    //    "n" => println!("No"),
+    //    _ => println!("----"),
+    //}
 
     let delay = Duration::from_millis(1000*interval);
     let mut action_queue_a = Vec::<SyncAction>::new();
@@ -420,52 +446,59 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) {
     let mut index_a_new: DirIndex;
     let mut index_b_new: DirIndex;
 
-    let i_a = load_index(path_a);
-    let i_b = load_index(path_b);
-    match (i_a, i_b) {
+    let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    let mut diffs_b: HashMap<PathBuf, DiffItem>;
+
+    match (load_index(path_a), load_index(path_b)) {
         (Ok(idx_a), Ok(idx_b)) => {
             index_a = idx_a;
             index_b = idx_b;
         }
         _ => {
-            index_a = map_dir(path_a).unwrap();
-            index_b = map_dir(path_b).unwrap();
+            index_a = map_dir(path_a)?;
+            index_b = map_dir(path_b)?;
             println!("No index found, updating B to match A");
-            let diffs = compare_dirs(&index_a, &index_b).unwrap();
-            sync_diffs(&diffs, path_a, path_b).unwrap();
+            let diffs = compare_dirs(&index_a, &index_b)?;
+            sync_diffs(&diffs, path_a, path_b)?;
+            index_a = map_dir(path_a)?;
+            index_b = map_dir(path_b)?;
+            save_index(&index_a, &path_a)?;
+            save_index(&index_b, &path_b)?;
 
         }
     }
 
-    let mut index_a = map_dir(path_a).unwrap();
-    let mut index_b = map_dir(path_b).unwrap();
-    
-    let mut diffs_a: HashMap<PathBuf, DiffItem>;
-    let mut diffs_b: HashMap<PathBuf, DiffItem>;
-    let diffs = compare_dirs(&index_a, &index_b).unwrap();
-    println!("diffs {:?}", diffs);
+    //let mut index_a = map_dir(path_a).unwrap();
+    //let mut index_b = map_dir(path_b).unwrap();
+    //
+    //let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    //let mut diffs_b: HashMap<PathBuf, DiffItem>;
+    //let diffs = compare_dirs(&index_a, &index_b).unwrap();
+    //println!("diffs {:?}", diffs);
 
 
     loop {
-        index_a_new = map_dir(path_a).unwrap();
-        diffs_a = compare_dirs(&index_a_new, &index_a).unwrap();
-        index_a = index_a_new;
-        println!("A changes {:?}", diffs_a);
-        index_b_new = map_dir(path_b).unwrap();
-        diffs_b = compare_dirs(&index_b_new, &index_b).unwrap();
-        index_b = index_b_new;
-        println!("B changes {:?}", diffs_b);
-        //check for changes in A and queue actions
-        //check for changes in B and queue actions
-        //check for conflicts
-        //if changes in A:
-        //    process queue A
-        //    update index A 
-        //if changes in B:
-        //    process queue B
-        //    update index B 
+        if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
+            index_a_new = map_dir(path_a)?;
+            diffs_a = compare_dirs(&index_a_new, &index_a)?;
+            index_b_new = map_dir(path_b)?;
+            diffs_b = compare_dirs(&index_b_new, &index_b)?;
+            if !diffs_a.is_empty() || !diffs_b.is_empty() {
+                solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                sync_diffs(&diffs_a, path_a, path_b)?;
+                sync_diffs(&diffs_b, path_b, path_a)?;
+                index_a = map_dir(path_a)?;
+                index_b = map_dir(path_b)?;
+                save_index(&index_a, &path_a)?;
+                save_index(&index_b, &path_b)?;
+            }
+        }
+        else {
+            println!("One directory not available!");
+        }
         sleep(delay);
     }
+    Ok(())
 }
 
 fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>> {
@@ -539,8 +572,12 @@ fn main() {
     let path_a = PathBuf::from(&args[1]).canonicalize().unwrap();
     let path_b = PathBuf::from(&args[2]).canonicalize().unwrap();
     let interval: u64 = args[3].parse().unwrap();
-
-    watch(&path_a, &path_b, interval);
+    match watch(&path_a, &path_b, interval) {
+        Ok(_) => {},
+        Err(e) => {
+            println!("Run error {}", e);
+        }
+    }
 }
 
 
