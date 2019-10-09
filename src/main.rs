@@ -475,14 +475,6 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
 // Main loop
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dyn Error>> {
 
-    //let reply = rprompt::prompt_reply_stdout("y or n: ").unwrap();
-    //println!("Your reply is {}", reply);
-    //match reply.as_str() {
-    //    "y" => println!("Yes"),
-    //    "n" => println!("No"),
-    //    _ => println!("----"),
-    //}
-
     let delay = Duration::from_millis(1000*interval);
 
     let mut index_a: DirIndex;
@@ -522,16 +514,6 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dy
 
         }
     }
-
-    //let mut index_a = map_dir(path_a).unwrap();
-    //let mut index_b = map_dir(path_b).unwrap();
-    //
-    //let mut diffs_a: HashMap<PathBuf, DiffItem>;
-    //let mut diffs_b: HashMap<PathBuf, DiffItem>;
-    //let diffs = compare_dirs(&index_a, &index_b).unwrap();
-    //println!("diffs {:?}", diffs);
-
-
     loop {
         if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
             index_a_new = map_dir(path_a)?;
