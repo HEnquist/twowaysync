@@ -16,6 +16,7 @@ use std::os::unix::fs::PermissionsExt;
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use walkdir::WalkDir;
+use chrono::{Local, DateTime, TimeZone};
 
 #[derive(Clone, Debug, PartialEq)]
 enum ChangeType {
@@ -489,6 +490,9 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64) -> Result<(), Box<dy
         (Ok(idx_a), Ok(idx_b)) => {
             index_a = idx_a;
             index_b = idx_b;
+            let idx_time_a: DateTime<Local> = Local.timestamp(index_a.scantime as i64, 0);
+            let idx_time_b: DateTime<Local> = Local.timestamp(index_b.scantime as i64, 0);
+            println!("Using indexes from {} and {}", idx_time_a, idx_time_b);
         }
         _ => {
             index_a = map_dir(path_a)?;
