@@ -1,5 +1,5 @@
 [package]
-name = "homesync"
+name = "twowaysync"
 version = "0.1.0"
 authors = ["henenq <henrik.enquist@maxiv.lu.se>"]
 edition = "2018"
