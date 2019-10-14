@@ -1,6 +1,3 @@
-extern crate rprompt;
-
-use std::process;
 use std::time::{Duration, SystemTime};
 use std::thread::sleep;
 use std::path::PathBuf;
@@ -34,11 +31,39 @@ struct DiffItem {
     mtime: i64,
 }
 
+impl fmt::Display for ChangeType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            ChangeType::Newer => write!(f,"Newer"),
+            ChangeType::Older => write!(f,"Older"),
+            ChangeType::NewOnly => write!(f,"Added"),
+            ChangeType::RefOnly => write!(f,"Removed"),
+            ChangeType::Modified => write!(f,"Modified"),
+        }
+    }
+}
+
+impl fmt::Display for DiffItem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,"{} {}, mtime: {}", self.diff, self.ftype, self.mtime)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 enum FileType {
     File,
     Dir,
     Link,
+}
+
+impl fmt::Display for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FileType::File => write!(f,"File"),
+            FileType::Dir => write!(f,"Dir"),
+            FileType::Link => write!(f,"Link"),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -492,19 +517,11 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
 // Main loop
 fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: bool) -> Result<(), Box<dyn Error>> {
 
-    let mut delay = Duration::from_millis(10000);
-    let mut run_sync_loop = false;
-
-    if let Some(ival) = interval {
-        delay = Duration::from_millis(1000*ival);
-        run_sync_loop = true;
-    }
-
-    if check_only {
-        run_sync_loop = false;
-    }
+    let delay = match (interval, check_only) {
+        (Some(ival), false) => Some(Duration::from_millis(1000*ival)),
+        _ => None,
+    };
     
-
     let mut index_a: DirIndex;
     let mut index_b: DirIndex;
     let mut index_a_new: DirIndex;
@@ -526,7 +543,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
             index_b = map_dir(path_b)?;
             let diffs = compare_dirs(&index_a, &index_b)?;
             if check_only {
-                println!("Diff: \n{:?}", diffs);
+                print_diffs(&diffs);
             }
             else {
                 println!("No index found, merging the contents of A and B");
@@ -536,7 +553,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                     "y" => println!("Syncing..."),
                     _ => {
                         println!("Exiting");
-                        process::exit(0);
+                        return Ok(())
                     }
                 }
                 sync_diffs(&diffs, path_a, path_b, true)?;
@@ -546,32 +563,40 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                 save_index(&index_b, &path_b)?;
                 println!("Done");
             }
-
         }
     }
-    if !run_sync_loop {
-        return Ok(())
-    }
-    loop {
-        if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
-            index_a_new = map_dir(path_a)?;
-            diffs_a = compare_dirs(&index_a_new, &index_a)?;
-            index_b_new = map_dir(path_b)?;
-            diffs_b = compare_dirs(&index_b_new, &index_b)?;
-            if !diffs_a.is_empty() || !diffs_b.is_empty() {
-                solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                sync_diffs(&diffs_a, path_a, path_b, false)?;
-                sync_diffs(&diffs_b, path_b, path_a, false)?;
-                index_a = map_dir(path_a)?;
-                index_b = map_dir(path_b)?;
-                save_index(&index_a, &path_a)?;
-                save_index(&index_b, &path_b)?;
+    match delay {
+        None => return Ok(()),
+        Some(delayval) => {
+            loop {
+                if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
+                    index_a_new = map_dir(path_a)?;
+                    diffs_a = compare_dirs(&index_a_new, &index_a)?;
+                    index_b_new = map_dir(path_b)?;
+                    diffs_b = compare_dirs(&index_b_new, &index_b)?;
+                    if !diffs_a.is_empty() || !diffs_b.is_empty() {
+                        solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                        sync_diffs(&diffs_a, path_a, path_b, false)?;
+                        sync_diffs(&diffs_b, path_b, path_a, false)?;
+                        index_a = map_dir(path_a)?;
+                        index_b = map_dir(path_b)?;
+                        save_index(&index_a, &path_a)?;
+                        save_index(&index_b, &path_b)?;
+                    }
+                }
+                else {
+                    println!("One directory is unavailable!");
+                }
+                sleep(delayval);
             }
-        }
-        else {
-            println!("One directory not available!");
-        }
-        sleep(delay);
+        },
+    };
+}
+
+fn print_diffs(diff: &HashMap<PathBuf, DiffItem>) {
+    println!("Diffs");
+    for (path, diffitem) in diff.iter() {
+        println!("{}: {}", diffitem, path.display());
     }
 }
 
@@ -585,14 +610,12 @@ fn is_valid_path(dir: String) -> Result<(), String> {
 fn is_valid_uint(val: String) -> Result<(), String> {
     match val.parse::<usize>() {
         Ok(intval) => {
-            if intval>0 {
-                Ok(())
-            }
-            else {
-                Err(String::from("Not a positive integer"))
+            match intval>0 {
+                true => Ok(()),
+                false => Err(String::from("Not a positive integer")),
             }
         }
-        Err(_) => Err(String::from("Not a positive integer")),
+        Err(_) => Err(String::from("Not a number")),
     }
 }
 
@@ -627,35 +650,23 @@ fn main() {
                                     .index(2))
                     .get_matches();
     
-    let mut check_only = false;
-    if matches.is_present("check") {
-        check_only = true;
-    }
+    let check_only = matches.is_present("check");
 
-    let path_a: PathBuf;
-    let path_b: PathBuf; 
+    let path_a = match matches.value_of("dir_a") {
+        Some(path) => PathBuf::from(&path).canonicalize().unwrap(),
+        _ => PathBuf::new(),
+    };
 
-    if let Some(dir_a) = matches.value_of("dir_a") {
-        path_a = PathBuf::from(&dir_a).canonicalize().unwrap();
-    }
-    else {
-        path_a = PathBuf::from(".").canonicalize().unwrap();
-    }
+    let path_b = match matches.value_of("dir_b") {
+        Some(path) => PathBuf::from(&path).canonicalize().unwrap(),
+        _ => PathBuf::new(),
+    };
 
-    if let Some(dir_b) = matches.value_of("dir_b") {
-        path_b = PathBuf::from(&dir_b).canonicalize().unwrap();
-    }
-    else {
-        path_b = PathBuf::from(".").canonicalize().unwrap();
-    }
+    let interval = match matches.value_of("interval") {
+        Some(i) => Some(i.parse::<u64>().unwrap()),
+        _ => None,
+    };
 
-    let interval: Option<u64>;
-    if let Some(i) = matches.value_of("interval") {
-        interval = Some(i.parse().unwrap());
-    }
-    else {
-        interval = None;
-    }
 
     match watch(&path_a, &path_b, interval, check_only) {
         Ok(_) => {},
