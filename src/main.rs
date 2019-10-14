@@ -524,8 +524,6 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
         _ => {
             index_a = map_dir(path_a)?;
             index_b = map_dir(path_b)?;
-
-
             let diffs = compare_dirs(&index_a, &index_b)?;
             if check_only {
                 println!("Diff: \n{:?}", diffs);
@@ -586,7 +584,14 @@ fn is_valid_path(dir: String) -> Result<(), String> {
 
 fn is_valid_uint(val: String) -> Result<(), String> {
     match val.parse::<usize>() {
-        Ok(_) =>  Ok(()),
+        Ok(intval) => {
+            if intval>0 {
+                Ok(())
+            }
+            else {
+                Err(String::from("Not a positive integer"))
+            }
+        }
         Err(_) => Err(String::from("Not a positive integer")),
     }
 }
@@ -621,20 +626,11 @@ fn main() {
                                     .validator(is_valid_path)
                                     .index(2))
                     .get_matches();
-    if let Some(w) = matches.value_of("interval") {
-        println!("Value for watch: {}", w);
-    }
-
-    if matches.is_present("single") {
-        println!("Run a single sync only");
-    }
-
+    
     let mut check_only = false;
     if matches.is_present("check") {
-        println!("Just check diff");
         check_only = true;
     }
-
 
     let path_a: PathBuf;
     let path_b: PathBuf; 
@@ -660,10 +656,7 @@ fn main() {
     else {
         interval = None;
     }
-    //let args: Vec<String> = env::args().collect();
-    
-    
-    //let interval: u64 = args[3].parse().unwrap();
+
     match watch(&path_a, &path_b, interval, check_only) {
         Ok(_) => {},
         Err(e) => {
