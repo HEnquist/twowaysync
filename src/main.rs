@@ -527,7 +527,10 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
 
 
             let diffs = compare_dirs(&index_a, &index_b)?;
-            if !check_only {
+            if check_only {
+                println!("Diff: \n{:?}", diffs);
+            }
+            else {
                 println!("No index found, merging the contents of A and B");
                 println!("This will sync all content of \n{}\nwith\n{}", path_a.display(), path_b.display());
                 let reply = rprompt::prompt_reply_stdout("Proceed? y or n: ").unwrap();
