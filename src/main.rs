@@ -15,6 +15,7 @@ use chrono::{Local, DateTime, TimeZone};
 use clap::{App, Arg, ArgGroup};
 use datatypes::{ChangeType, DiffItem, FileType, PathData, DirIndex, SyncAction, RunAction};
 
+const INDEXFILENAME: &str = ".twoway.json";
 
 fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -56,7 +57,7 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
                 }
             }
         }
-    let jsonpath = PathBuf::from(".twoway.json");
+    let jsonpath = PathBuf::from(INDEXFILENAME);
     if paths.contains_key(&jsonpath) {
         paths.remove(&jsonpath).unwrap();
     }
@@ -189,15 +190,13 @@ fn solve_conflicts(diff_master: &mut HashMap<PathBuf, DiffItem>, diff_copy: &mut
 }
 
 fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
-    let mut dest_path = root.clone();
-    dest_path.push(path);
-    dest_path
+    [root, path].iter().collect::<PathBuf>()
 }
 
 fn save_index(idx: &DirIndex, path: &PathBuf) -> Result<(), Box<dyn Error>> {
     let serialized = serde_json::to_string(&idx)?;
     let mut jsonpath = PathBuf::from(path);
-    jsonpath.push(".twoway.json");
+    jsonpath.push(INDEXFILENAME);
     let mut jsonfile = File::create(jsonpath)?;
     jsonfile.write_all(serialized.as_bytes())?;
     Ok(())
@@ -205,7 +204,7 @@ fn save_index(idx: &DirIndex, path: &PathBuf) -> Result<(), Box<dyn Error>> {
 
 fn load_index(path: &PathBuf) -> Result<(DirIndex), Box<dyn Error>> {
     let mut jsonpath = PathBuf::from(path);
-    jsonpath.push(".twoway.json");
+    jsonpath.push(INDEXFILENAME);
     let mut jsonfile = File::open(jsonpath)?;
     let mut contents = String::new();
     jsonfile.read_to_string(&mut contents)?;
@@ -348,8 +347,10 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
     match delay {
         None => return Ok(()),
         Some(delayval) => {
+            let index_a_file: PathBuf = [&path_a, &PathBuf::from(INDEXFILENAME)].iter().collect();
+            let index_b_file: PathBuf = [&path_b, &PathBuf::from(INDEXFILENAME)].iter().collect();
             loop {
-                if fs::metadata(&path_a).is_ok() && fs::metadata(&path_b).is_ok() {
+                if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
                     index_a_new = map_dir(path_a)?;
                     diffs_a = compare_dirs(&index_a_new, &index_a)?;
                     index_b_new = map_dir(path_b)?;
