@@ -21,42 +21,37 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let mut paths = HashMap::new();
     let depth = usize::max_value();
-    for entry in WalkDir::new(basepath.clone())
+    for direntry in WalkDir::new(basepath.clone())
             .follow_links(false)
             .max_depth(depth)
             .into_iter()
             .skip(1)
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            match entry.metadata() {
-                Err(_) => {}
-                Ok(m) => {
-                    let mtime = FileTime::from_last_modification_time(&m).seconds();
-                    let relpath = path.strip_prefix(basepath.to_str().unwrap_or(""))?.to_path_buf();
-                    let ftype = if m.file_type().is_dir() {
-                        FileType::Dir
-                    }
-                    else if m.file_type().is_symlink() {
-                        FileType::Link
-                    }
-                    else {
-                        FileType::File
-                    };
-
-                    //println!("insert {}",relpath.to_path_buf().display());
-                    paths.insert(
-                        relpath,
-                        PathData {
-                            mtime: mtime,
-                            perms: m.permissions().mode(),
-                            size: m.len(),
-                            ftype: ftype,
-                        },
-                    );
-                }
-            }
+    {
+        let entry = direntry?; 
+        let path = entry.path();
+        let m = entry.metadata()?;
+        let mtime = FileTime::from_last_modification_time(&m).seconds();
+        let relpath = path.strip_prefix(basepath.to_str().unwrap_or(""))?.to_path_buf();
+        let ftype = if m.file_type().is_dir() {
+            FileType::Dir
         }
+        else if m.file_type().is_symlink() {
+            FileType::Link
+        }
+        else {
+            FileType::File
+        };
+        //println!("insert {}",relpath.to_path_buf().display());
+        paths.insert(
+            relpath,
+            PathData {
+                mtime: mtime,
+                perms: m.permissions().mode(),
+                size: m.len(),
+                ftype: ftype,
+            },
+        );
+    }
     let jsonpath = PathBuf::from(INDEXFILENAME);
     if paths.contains_key(&jsonpath) {
         paths.remove(&jsonpath).unwrap();
@@ -344,39 +339,45 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
             }
         }
     }
-    match delay {
-        None => return Ok(()),
-        Some(delayval) => {
-            let index_a_file: PathBuf = [&path_a, &PathBuf::from(INDEXFILENAME)].iter().collect();
-            let index_b_file: PathBuf = [&path_b, &PathBuf::from(INDEXFILENAME)].iter().collect();
-            loop {
-                if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                    index_a_new = map_dir(path_a)?;
-                    diffs_a = compare_dirs(&index_a_new, &index_a)?;
-                    index_b_new = map_dir(path_b)?;
-                    diffs_b = compare_dirs(&index_b_new, &index_b)?;
+    if let Some(delayval) = delay {
+        let index_a_file: PathBuf = [&path_a, &PathBuf::from(INDEXFILENAME)].iter().collect();
+        let index_b_file: PathBuf = [&path_b, &PathBuf::from(INDEXFILENAME)].iter().collect();
+        loop {
+            sleep(delayval);
+            if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
+                if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a), map_dir(path_b)) {
+                    index_a_new = idx_a;
+                    index_b_new = idx_b;
+                }
+                else {
+                    println!("One scan task encountered an error!");
+                    continue;
+                }
+                diffs_a = compare_dirs(&index_a_new, &index_a)?;
+                diffs_b = compare_dirs(&index_b_new, &index_b)?;
+                if !diffs_a.is_empty() || !diffs_b.is_empty() {    
                     if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                        if !diffs_a.is_empty() || !diffs_b.is_empty() {
-                            solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                            sync_diffs(&diffs_a, path_a, path_b, false)?;
-                            sync_diffs(&diffs_b, path_b, path_a, false)?;
-                            index_a = map_dir(path_a)?;
-                            index_b = map_dir(path_b)?;
-                            save_index(&index_a, &path_a)?;
-                            save_index(&index_b, &path_b)?;
-                        }
+                        solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                        sync_diffs(&diffs_a, path_a, path_b, false)?;
+                        sync_diffs(&diffs_b, path_b, path_a, false)?;
+                        index_a = map_dir(path_a)?;
+                        index_b = map_dir(path_b)?;
+                        save_index(&index_a, &path_a)?;
+                        save_index(&index_b, &path_b)?;
                     }
                     else {
                         println!("One directory became unavailable while scanning!");
                     }
                 }
-                else {
-                    println!("One directory is unavailable!");
-                }
-                sleep(delayval);
             }
-        },
-    };
+            else {
+                println!("One directory is unavailable!");
+            }
+        }
+    }
+    else {
+        return Ok(());
+    }
 }
 
 fn print_diffs(diff: &HashMap<PathBuf, DiffItem>) {
