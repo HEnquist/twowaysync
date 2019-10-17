@@ -355,14 +355,19 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                     diffs_a = compare_dirs(&index_a_new, &index_a)?;
                     index_b_new = map_dir(path_b)?;
                     diffs_b = compare_dirs(&index_b_new, &index_b)?;
-                    if !diffs_a.is_empty() || !diffs_b.is_empty() {
-                        solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                        sync_diffs(&diffs_a, path_a, path_b, false)?;
-                        sync_diffs(&diffs_b, path_b, path_a, false)?;
-                        index_a = map_dir(path_a)?;
-                        index_b = map_dir(path_b)?;
-                        save_index(&index_a, &path_a)?;
-                        save_index(&index_b, &path_b)?;
+                    if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
+                        if !diffs_a.is_empty() || !diffs_b.is_empty() {
+                            solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                            sync_diffs(&diffs_a, path_a, path_b, false)?;
+                            sync_diffs(&diffs_b, path_b, path_a, false)?;
+                            index_a = map_dir(path_a)?;
+                            index_b = map_dir(path_b)?;
+                            save_index(&index_a, &path_a)?;
+                            save_index(&index_b, &path_b)?;
+                        }
+                    }
+                    else {
+                        println!("One directory became unavailable while scanning!");
                     }
                 }
                 else {
