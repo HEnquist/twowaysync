@@ -18,6 +18,7 @@ use datatypes::{ChangeType, DiffItem, FileType, PathData, DirIndex, SyncAction, 
 const INDEXFILENAME: &str = ".twoway.json";
 
 fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
+    let basepath_str = basepath.to_str().unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let mut paths = HashMap::new();
     let depth = usize::max_value();
@@ -31,7 +32,7 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
         let path = entry.path();
         let m = entry.metadata()?;
         let mtime = FileTime::from_last_modification_time(&m).seconds();
-        let relpath = path.strip_prefix(basepath.to_str().unwrap_or(""))?.to_path_buf();
+        let relpath = path.strip_prefix(&basepath_str).unwrap().to_path_buf();
         let ftype = if m.file_type().is_dir() {
             FileType::Dir
         }
@@ -77,22 +78,14 @@ fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBu
                     //println!("{} found, N is newer", path.display());
                     diffs.insert(
                         path.to_path_buf(),
-                        DiffItem {
-                            diff: ChangeType::Newer,
-                            ftype: pathdata_new.ftype,
-                            mtime: pathdata_new.mtime,
-                        },
+                        DiffItem::new(ChangeType::Newer, pathdata_new.ftype, pathdata_new.mtime),
                     );
                 }
                 else if pathdata_new.mtime < pathdata_ref.mtime {
                     //println!("{} found, R is newer", path.display());
                     diffs.insert(
                         path.to_path_buf(),
-                        DiffItem {
-                            diff: ChangeType::Older,
-                            ftype: pathdata_new.ftype,
-                            mtime: pathdata_new.mtime,
-                        },
+                        DiffItem::new(ChangeType::Older, pathdata_new.ftype, pathdata_new.mtime),
                     );
                 }
                 else {
@@ -100,11 +93,7 @@ fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBu
                     // mode (or size, unlikely) changed
                     diffs.insert(
                         path.to_path_buf(),
-                        DiffItem {
-                            diff: ChangeType::Modified,
-                            ftype: pathdata_new.ftype,
-                            mtime: pathdata_new.mtime,
-                        },
+                        DiffItem::new(ChangeType::Modified, pathdata_new.ftype, pathdata_new.mtime),
                     );
                 }
                 dir_ref_copy.contents.remove(path);
@@ -113,11 +102,7 @@ fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBu
                 //println!("{} is missing from R.", path.display());
                 diffs.insert(
                         path.to_path_buf(),
-                        DiffItem {
-                            diff: ChangeType::NewOnly,
-                            ftype: pathdata_new.ftype,
-                            mtime: pathdata_new.mtime,
-                        },
+                        DiffItem::new(ChangeType::NewOnly, pathdata_new.ftype, pathdata_new.mtime),
                 );
             }
         }
@@ -131,11 +116,7 @@ fn compare_dirs(dir_new: &DirIndex, dir_ref: &DirIndex) -> Result<HashMap<PathBu
                 //println!("{} is missing from N.", path.display());
                 diffs.insert(
                     path.to_path_buf(),
-                    DiffItem {
-                        diff: ChangeType::RefOnly,
-                        ftype: pathdata_ref.ftype,
-                        mtime: pathdata_ref.mtime,
-                    },
+                    DiffItem::new(ChangeType::RefOnly, pathdata_ref.ftype, pathdata_ref.mtime),
                 );
             }
         }
@@ -184,7 +165,7 @@ fn solve_conflicts(diff_master: &mut HashMap<PathBuf, DiffItem>, diff_copy: &mut
     Ok(())
 }
 
-fn translate_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
+fn append_base_path(path: &PathBuf, root: &PathBuf) -> PathBuf {
     [root, path].iter().collect::<PathBuf>()
 }
 
@@ -214,7 +195,7 @@ fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>
         match action.run() {
             Ok(_) => {},
             Err(e) => {
-                println!("Run error {}, {:?}", e, action);
+                println!("Action run error {}, {}", e, action);
             }
         }
     }
@@ -230,39 +211,39 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
             | ChangeType::Modified => {
                 match diffitem.ftype {
                     FileType::Link => {
-                        actions.push(SyncAction::CopyLink {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                        actions.push(SyncAction::CopyLink {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
                     },
                     FileType::Dir => {
-                        actions.push(SyncAction::CopyDir {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                        actions.push(SyncAction::CopyDir {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
                     },
                     FileType::File => {
-                        actions.push(SyncAction::CopyFile {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                        actions.push(SyncAction::CopyFile {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
                     },
                 }
-                actions.push(SyncAction::CopyMeta {src: translate_path(path, path_src), dest: translate_path(path, path_dest)});
+                actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
             },
             ChangeType::RefOnly => {
                 if keep_all {
                     match diffitem.ftype {
                         FileType::Link => {
-                            actions.push(SyncAction::CopyLink {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                            actions.push(SyncAction::CopyLink {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                         },
                         FileType::Dir => {
-                            actions.push(SyncAction::CopyDir {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                            actions.push(SyncAction::CopyDir {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                         },
                         FileType::File => {
-                            actions.push(SyncAction::CopyFile {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                            actions.push(SyncAction::CopyFile {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                         },
                     }
-                    actions.push(SyncAction::CopyMeta {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                    actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                 }
                 else {
                     match diffitem.ftype {
                         FileType::Dir => {
-                            actions.push(SyncAction::DeleteDir {dest: translate_path(path, path_dest)});
+                            actions.push(SyncAction::DeleteDir {dest: append_base_path(path, path_dest)});
                         },
                         _ => {
-                            actions.push(SyncAction::DeleteFile {dest: translate_path(path, path_dest)});
+                            actions.push(SyncAction::DeleteFile {dest: append_base_path(path, path_dest)});
                         },
                     }
                 }
@@ -270,16 +251,16 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
             ChangeType::Older => {
                 match diffitem.ftype {
                     FileType::Link => {
-                        actions.push(SyncAction::CopyLink {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                        actions.push(SyncAction::CopyLink {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                     },
                     FileType::Dir => {
-                        actions.push(SyncAction::CopyDir {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                        actions.push(SyncAction::CopyDir {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                     },
                     FileType::File => {
-                        actions.push(SyncAction::CopyFile {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                        actions.push(SyncAction::CopyFile {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
                     },
                 }
-                actions.push(SyncAction::CopyMeta {src: translate_path(path, path_dest), dest: translate_path(path, path_src)});
+                actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
 
             },
         }
@@ -318,25 +299,24 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
             let diffs = compare_dirs(&index_a, &index_b)?;
             if check_only {
                 print_diffs(&diffs);
+                return Ok(())
             }
-            else {
-                println!("No index found, merging the contents of A and B");
-                println!("This will sync all content of \n{}\nwith\n{}", path_a.display(), path_b.display());
-                let reply = rprompt::prompt_reply_stdout("Proceed? y or n: ").unwrap();
-                match reply.as_str() {
-                    "y" => println!("Syncing..."),
-                    _ => {
-                        println!("Exiting");
-                        return Ok(())
-                    }
+            println!("No index found, merging the contents of A and B");
+            println!("This will sync all content of \n{}\nwith\n{}", path_a.display(), path_b.display());
+            let reply = rprompt::prompt_reply_stdout("Proceed? y or n: ").unwrap();
+            match reply.as_str() {
+                "y" => println!("Syncing..."),
+                _ => {
+                    println!("Exiting");
+                    return Ok(())
                 }
-                sync_diffs(&diffs, path_a, path_b, true)?;
-                index_a = map_dir(path_a)?;
-                index_b = map_dir(path_b)?;
-                save_index(&index_a, &path_a)?;
-                save_index(&index_b, &path_b)?;
-                println!("Done");
             }
+            sync_diffs(&diffs, path_a, path_b, true)?;
+            index_a = map_dir(path_a)?;
+            index_b = map_dir(path_b)?;
+            save_index(&index_a, &path_a)?;
+            save_index(&index_b, &path_b)?;
+            println!("Done");
         }
     }
     if let Some(delayval) = delay {
@@ -458,7 +438,7 @@ fn main() {
     match watch(&path_a, &path_b, interval, check_only) {
         Ok(_) => {},
         Err(e) => {
-            println!("Run error {}", e);
+            println!("Watch loop returned an error {}", e);
         }
     }
 }
