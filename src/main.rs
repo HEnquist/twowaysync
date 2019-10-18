@@ -205,63 +205,36 @@ fn process_queue(mut action_queue: Vec<SyncAction>) -> Result<(), Box<dyn Error>
 fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: &PathBuf, keep_all: bool) -> Result<(), Box<dyn Error>> {
     let mut actions = Vec::<SyncAction>::new();
     for (path, diffitem) in diff.iter() {
-        match diffitem.diff {
-            ChangeType::Newer 
-            | ChangeType::NewOnly
-            | ChangeType::Modified => {
-                match diffitem.ftype {
-                    FileType::Link => {
-                        actions.push(SyncAction::CopyLink {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
-                    },
-                    FileType::Dir => {
-                        actions.push(SyncAction::CopyDir {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
-                    },
-                    FileType::File => {
-                        actions.push(SyncAction::CopyFile {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
-                    },
-                }
-                actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_src), dest: append_base_path(path, path_dest)});
+        match (&diffitem.diff, keep_all) {
+            (&ChangeType::Newer, _) 
+            | (&ChangeType::NewOnly, _)
+            | (&ChangeType::Modified, _) => {
+                let src = append_base_path(path, path_src);
+                let dest = append_base_path(path, path_dest);
+                actions.push(match diffitem.ftype {
+                    FileType::Link => SyncAction::CopyLink {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                    FileType::Dir => SyncAction::CopyDir {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                    FileType::File => SyncAction::CopyFile {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                });
+                actions.push(SyncAction::CopyMeta  {src: src.to_path_buf(), dest: dest.to_path_buf()});
             },
-            ChangeType::RefOnly => {
-                if keep_all {
-                    match diffitem.ftype {
-                        FileType::Link => {
-                            actions.push(SyncAction::CopyLink {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                        },
-                        FileType::Dir => {
-                            actions.push(SyncAction::CopyDir {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                        },
-                        FileType::File => {
-                            actions.push(SyncAction::CopyFile {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                        },
-                    }
-                    actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                }
-                else {
-                    match diffitem.ftype {
-                        FileType::Dir => {
-                            actions.push(SyncAction::DeleteDir {dest: append_base_path(path, path_dest)});
-                        },
-                        _ => {
-                            actions.push(SyncAction::DeleteFile {dest: append_base_path(path, path_dest)});
-                        },
-                    }
-                }
+            (&ChangeType::RefOnly, false) => {
+                let dest = append_base_path(path, path_dest);
+                actions.push(match diffitem.ftype {
+                    FileType::Dir => SyncAction::DeleteDir {dest: dest.to_path_buf()},
+                    _ => SyncAction::DeleteFile {dest: dest.to_path_buf()},
+                });
             },
-            ChangeType::Older => {
-                match diffitem.ftype {
-                    FileType::Link => {
-                        actions.push(SyncAction::CopyLink {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                    },
-                    FileType::Dir => {
-                        actions.push(SyncAction::CopyDir {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                    },
-                    FileType::File => {
-                        actions.push(SyncAction::CopyFile {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-                    },
-                }
-                actions.push(SyncAction::CopyMeta {src: append_base_path(path, path_dest), dest: append_base_path(path, path_src)});
-
+            (&ChangeType::Older, _)
+            | (&ChangeType::RefOnly, true) => {
+                let src = append_base_path(path, path_dest);
+                let dest = append_base_path(path, path_src);
+                actions.push(match diffitem.ftype {
+                    FileType::Link => SyncAction::CopyLink {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                    FileType::Dir => SyncAction::CopyDir {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                    FileType::File => SyncAction::CopyFile {src: src.to_path_buf(), dest: dest.to_path_buf()},
+                });
+                actions.push(SyncAction::CopyMeta  {src: src.to_path_buf(), dest: dest.to_path_buf()});
             },
         }
     }
