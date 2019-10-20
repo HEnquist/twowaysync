@@ -14,10 +14,11 @@ use walkdir::WalkDir;
 use chrono::{Local, DateTime, TimeZone};
 use clap::{App, Arg, ArgGroup};
 use datatypes::{ChangeType, DiffItem, FileType, PathData, DirIndex, SyncAction, RunAction};
+use globset::{Glob, GlobSetBuilder, GlobSet};
 
 const INDEXFILENAME: &str = ".twoway.json";
 
-fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
+fn map_dir(basepath: &PathBuf, exclude_globs: &GlobSet) -> Result<DirIndex,  Box<dyn Error>> {
     let basepath_str = basepath.to_str().unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
     let mut paths = HashMap::new();
@@ -26,6 +27,9 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
             .follow_links(false)
             .max_depth(depth)
             .into_iter()
+            .filter_entry(|e| {
+                !exclude_globs.is_match(e.path().strip_prefix(&basepath_str).unwrap())
+            })
             .skip(1)
     {
         let entry = direntry?; 
@@ -52,10 +56,6 @@ fn map_dir(basepath: &PathBuf) -> Result<DirIndex,  Box<dyn Error>> {
                 ftype: ftype,
             },
         );
-    }
-    let jsonpath = PathBuf::from(INDEXFILENAME);
-    if paths.contains_key(&jsonpath) {
-        paths.remove(&jsonpath).unwrap();
     }
     Ok(DirIndex {
         scantime: current_time,
@@ -243,7 +243,7 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
 }
 
 // Main loop
-fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: bool) -> Result<(), Box<dyn Error>> {
+fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: bool, exclude_globs: GlobSet) -> Result<(), Box<dyn Error>> {
 
     let delay = match (interval, check_only) {
         (Some(ival), false) => Some(Duration::from_millis(1000*ival)),
@@ -267,8 +267,8 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
             println!("Using indexes from {} and {}", idx_time_a, idx_time_b);
         }
         _ => {
-            index_a = map_dir(path_a)?;
-            index_b = map_dir(path_b)?;
+            index_a = map_dir(path_a, &exclude_globs)?;
+            index_b = map_dir(path_b, &exclude_globs)?;
             let diffs = compare_dirs(&index_a, &index_b)?;
             if check_only {
                 print_diffs(&diffs);
@@ -285,8 +285,8 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                 }
             }
             sync_diffs(&diffs, path_a, path_b, true)?;
-            index_a = map_dir(path_a)?;
-            index_b = map_dir(path_b)?;
+            index_a = map_dir(path_a, &exclude_globs)?;
+            index_b = map_dir(path_b, &exclude_globs)?;
             save_index(&index_a, &path_a)?;
             save_index(&index_b, &path_b)?;
             println!("Done");
@@ -298,7 +298,7 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
         loop {
             sleep(delayval);
             if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a), map_dir(path_b)) {
+                if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a, &exclude_globs), map_dir(path_b, &exclude_globs)) {
                     index_a_new = idx_a;
                     index_b_new = idx_b;
                 }
@@ -313,8 +313,8 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                         solve_conflicts(&mut diffs_a, &mut diffs_b)?;
                         sync_diffs(&diffs_a, path_a, path_b, false)?;
                         sync_diffs(&diffs_b, path_b, path_a, false)?;
-                        index_a = map_dir(path_a)?;
-                        index_b = map_dir(path_b)?;
+                        index_a = map_dir(path_a, &exclude_globs)?;
+                        index_b = map_dir(path_b, &exclude_globs)?;
                         save_index(&index_a, &path_a)?;
                         save_index(&index_b, &path_b)?;
                     }
@@ -359,9 +359,16 @@ fn is_valid_uint(val: String) -> Result<(), String> {
     }
 }
 
+fn is_valid_pattern(patt: String) -> Result<(), String> {
+    match Glob::new(&patt) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(String::from("Invalid pattern")),
+    }
+}
+
 fn main() {
     let matches = App::new("TwoWaySync")
-                    .version("0.1.1")
+                    .version("0.1.2")
                     .author("Henrik Enquist <henrik.enquist@gmail.com>")
                     .about("Sync two directories")
                     .arg(Arg::with_name("interval")
@@ -372,12 +379,20 @@ fn main() {
                                 .takes_value(true))
                     .arg(Arg::with_name("single")
                                 .short("s")
-                                .help("Do a single sync only"))   
+                                .help("Do a single sync only"))
                     .arg(Arg::with_name("check")
                                 .short("c")
-                                .help("Compare and show diff (default)"))   
+                                .help("Compare and show diff (default)"))
+                    .arg(Arg::with_name("exclude")
+                                .short("e")
+                                .long("exclude")
+                                .takes_value(true)
+                                .number_of_values(1)
+                                .multiple(true)
+                                .validator(is_valid_pattern)
+                                .help("Exclude files and dirs matching pattern"))
                     .group(ArgGroup::with_name("sync")
-                                .args(&["check", "single", "interval"]))      
+                                .args(&["check", "single", "interval"]))
                     .arg(Arg::with_name("dir_a")
                                     .help("First directory")
                                     .required(true)
@@ -407,8 +422,16 @@ fn main() {
         _ => None,
     };
 
+    let mut builder = GlobSetBuilder::new();
+    if let Some(excludes) = matches.values_of("exclude") {
+        for excl in excludes {
+            builder.add(Glob::new(&excl).unwrap());
+        }
+    }
+    builder.add(Glob::new(INDEXFILENAME).unwrap());
+    let exclude_globs = builder.build().unwrap();
 
-    match watch(&path_a, &path_b, interval, check_only) {
+    match watch(&path_a, &path_b, interval, check_only, exclude_globs) {
         Ok(_) => {},
         Err(e) => {
             println!("Watch loop returned an error {}", e);
