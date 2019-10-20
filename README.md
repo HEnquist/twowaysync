@@ -5,7 +5,7 @@ This is a utility to keep two directories in sync. The intended use is to sync a
 ## Usage
 
 Run it with the help flag, -h and it will display usage information:
-```sh
+```
 TwoWaySync 0.1.2
 Henrik Enquist <henrik.enquist@gmail.com>
 Sync two directories
@@ -30,11 +30,11 @@ ARGS:
 
 Option | Explanation
 --- | ---
--c | Compare the directories and print a diff, no files are modified
--h | Prints help
--s | Compare the two directories and sync their contents
--e | Exclude files and directories matching a pattern, for example --exclude=*.zip
--w \<interval\> | Watch both directories for changes every \<interval\> seconds and sync them
+-c | Compare the directories and print a diff, no files are modified.
+-h | Prints help.
+-s | Compare the two directories and sync their contents.
+-e | Exclude files and directories matching a pattern, for example --exclude=*.zip. This option can occur more than once to exclude multiple patterns. 
+-w \<interval\> | Watch both directories for changes every \<interval\> seconds and sync them.
 
 
 Example 
