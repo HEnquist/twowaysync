@@ -6,7 +6,7 @@ This is a utility to keep two directories in sync. The intended use is to sync a
 
 Run it with the help flag, -h and it will display usage information:
 ```sh
-TwoWaySync 0.1.1
+TwoWaySync 0.1.2
 Henrik Enquist <henrik.enquist@gmail.com>
 Sync two directories
 
@@ -20,7 +20,8 @@ FLAGS:
     -V, --version    Prints version information
 
 OPTIONS:
-    -w, --watch <interval>    Interval in seconds to watch for changes
+    -e, --exclude <exclude>...    Exclude files and dirs matching pattern
+    -w, --watch <interval>        Interval in seconds to watch for changes
 
 ARGS:
     <dir_a>    First directory
@@ -32,6 +33,7 @@ Option | Explanation
 -c | Compare the directories and print a diff, no files are modified
 -h | Prints help
 -s | Compare the two directories and sync their contents
+-e | Exclude files and directories matching a pattern, for example --exclude=*.zip
 -w \<interval\> | Watch both directories for changes every \<interval\> seconds and sync them
 
 
