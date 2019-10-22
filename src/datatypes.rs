@@ -24,6 +24,12 @@ pub struct DiffItem {
     pub mtime: i64,
 }
 
+impl DiffItem {
+    pub fn new(diff: ChangeType, ftype: FileType, mtime: i64) -> DiffItem {
+        DiffItem { diff: diff, ftype: ftype, mtime: mtime }
+    }
+}
+
 impl fmt::Display for ChangeType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
