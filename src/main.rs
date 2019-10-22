@@ -2,6 +2,8 @@ mod datatypes;
 
 use std::time::{Duration, SystemTime};
 use std::thread::sleep;
+use std::thread;
+use std::sync::mpsc;
 use std::path::PathBuf;
 use std::fs;
 use std::fs::File;
@@ -242,21 +244,10 @@ fn sync_diffs(diff: &HashMap<PathBuf, DiffItem>, path_src: &PathBuf, path_dest: 
     Ok(())
 }
 
-// Main loop
-fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: bool, exclude_globs: GlobSet) -> Result<(), Box<dyn Error>> {
 
-    let delay = match (interval, check_only) {
-        (Some(ival), false) => Some(Duration::from_millis(1000*ival)),
-        _ => None,
-    };
-    
-    let mut index_a: DirIndex;
-    let mut index_b: DirIndex;
-    let mut index_a_new: DirIndex;
-    let mut index_b_new: DirIndex;
-
-    let mut diffs_a: HashMap<PathBuf, DiffItem>;
-    let mut diffs_b: HashMap<PathBuf, DiffItem>;
+fn prepare_dirs(path_a: &PathBuf, path_b: &PathBuf, check_only: bool, exclude_globs: &GlobSet) -> Result<(), Box<dyn Error>> {
+    let index_a: DirIndex;
+    let index_b: DirIndex;
 
     match (load_index(path_a), load_index(path_b)) {
         (Ok(idx_a), Ok(idx_b)) => {
@@ -267,8 +258,8 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
             println!("Using indexes from {} and {}", idx_time_a, idx_time_b);
         }
         _ => {
-            index_a = map_dir(path_a, &exclude_globs)?;
-            index_b = map_dir(path_b, &exclude_globs)?;
+            index_a = map_dir(path_a, exclude_globs)?;
+            index_b = map_dir(path_b, exclude_globs)?;
             let diffs = compare_dirs(&index_a, &index_b)?;
             if check_only {
                 print_diffs(&diffs);
@@ -285,54 +276,67 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: Option<u64>, check_only: 
                 }
             }
             sync_diffs(&diffs, path_a, path_b, true)?;
-            index_a = map_dir(path_a, &exclude_globs)?;
-            index_b = map_dir(path_b, &exclude_globs)?;
-            save_index(&index_a, &path_a)?;
-            save_index(&index_b, &path_b)?;
+
             println!("Done");
         }
     }
-    if let Some(delayval) = delay {
-        let index_a_file: PathBuf = [&path_a, &PathBuf::from(INDEXFILENAME)].iter().collect();
-        let index_b_file: PathBuf = [&path_b, &PathBuf::from(INDEXFILENAME)].iter().collect();
-        loop {
-            sleep(delayval);
-            if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a, &exclude_globs), map_dir(path_b, &exclude_globs)) {
-                    index_a_new = idx_a;
-                    index_b_new = idx_b;
-                }
-                else {
-                    println!("One scan task encountered an error!");
-                    continue;
-                }
-                diffs_a = compare_dirs(&index_a_new, &index_a)?;
-                diffs_b = compare_dirs(&index_b_new, &index_b)?;
-                if !diffs_a.is_empty() || !diffs_b.is_empty() {    
-                    if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                        solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                        sync_diffs(&diffs_a, path_a, path_b, false)?;
-                        sync_diffs(&diffs_b, path_b, path_a, false)?;
-                        index_a = map_dir(path_a, &exclude_globs)?;
-                        index_b = map_dir(path_b, &exclude_globs)?;
-                        save_index(&index_a, &path_a)?;
-                        save_index(&index_b, &path_b)?;
-                    }
-                    else {
-                        println!("One directory became unavailable while scanning!");
-                    }
-                }
-            }
-            else {
-                println!("One directory is unavailable!");
-            }
-        }
-    }
-    else {
-        return Ok(());
-    }
+    Ok(())
 }
 
+// Main loop
+fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64, exclude_globs: GlobSet, rx: mpsc::Receiver<usize>) -> Result<(), Box<dyn Error>> {
+
+    let delay = Duration::from_millis(1000*interval);
+    
+    let mut index_a: DirIndex;
+    let mut index_b: DirIndex;
+    let mut index_a_new: DirIndex;
+    let mut index_b_new: DirIndex;
+
+    let mut diffs_a: HashMap<PathBuf, DiffItem>;
+    let mut diffs_b: HashMap<PathBuf, DiffItem>;
+
+    index_a = map_dir(path_a, &exclude_globs)?;
+    index_b = map_dir(path_b, &exclude_globs)?;
+    save_index(&index_a, &path_a)?;
+    save_index(&index_b, &path_b)?;
+
+    let index_a_file: PathBuf = [&path_a, &PathBuf::from(INDEXFILENAME)].iter().collect();
+    let index_b_file: PathBuf = [&path_b, &PathBuf::from(INDEXFILENAME)].iter().collect();
+    loop {
+        sleep(delay);
+        if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
+            if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a, &exclude_globs), map_dir(path_b, &exclude_globs)) {
+                index_a_new = idx_a;
+                index_b_new = idx_b;
+            }
+            else {
+                println!("One scan task encountered an error!");
+                continue;
+            }
+            diffs_a = compare_dirs(&index_a_new, &index_a)?;
+            diffs_b = compare_dirs(&index_b_new, &index_b)?;
+            if !diffs_a.is_empty() || !diffs_b.is_empty() {    
+                if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
+                    solve_conflicts(&mut diffs_a, &mut diffs_b)?;
+                    sync_diffs(&diffs_a, path_a, path_b, false)?;
+                    sync_diffs(&diffs_b, path_b, path_a, false)?;
+                    index_a = map_dir(path_a, &exclude_globs)?;
+                    index_b = map_dir(path_b, &exclude_globs)?;
+                    save_index(&index_a, &path_a)?;
+                    save_index(&index_b, &path_b)?;
+                }
+                else {
+                    println!("One directory became unavailable while scanning!");
+                }
+            }
+        }
+        else {
+            println!("One directory is unavailable!");
+        }
+    }
+}
+    
 fn print_diffs(diff: &HashMap<PathBuf, DiffItem>) {
     println!("Diffs");
     for (path, diffitem) in diff.iter() {
@@ -368,7 +372,7 @@ fn is_valid_pattern(patt: String) -> Result<(), String> {
 
 fn main() {
     let matches = App::new("TwoWaySync")
-                    .version("0.1.2")
+                    .version("0.1.3")
                     .author("Henrik Enquist <henrik.enquist@gmail.com>")
                     .about("Sync two directories")
                     .arg(Arg::with_name("interval")
@@ -418,8 +422,8 @@ fn main() {
     };
 
     let interval = match matches.value_of("interval") {
-        Some(i) => Some(i.parse::<u64>().unwrap()),
-        _ => None,
+        Some(i) => i.parse::<u64>().unwrap(),
+        _ => 0,
     };
 
     let mut builder = GlobSetBuilder::new();
@@ -431,11 +435,21 @@ fn main() {
     builder.add(Glob::new(INDEXFILENAME).unwrap());
     let exclude_globs = builder.build().unwrap();
 
-    match watch(&path_a, &path_b, interval, check_only, exclude_globs) {
-        Ok(_) => {},
-        Err(e) => {
-            println!("Watch loop returned an error {}", e);
+    prepare_dirs(&path_a, &path_b, check_only, &exclude_globs).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        match watch(&path_a, &path_b, interval, exclude_globs, rx) {
+            Ok(_) => {},
+            Err(e) => {
+                println!("Watch loop returned an error {}", e);
+            }
         }
+    });
+
+    let delay = Duration::from_millis(1000);
+    loop {
+        sleep(delay);
     }
 }
 
