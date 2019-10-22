@@ -20,6 +20,12 @@ use globset::{Glob, GlobSetBuilder, GlobSet};
 
 const INDEXFILENAME: &str = ".twoway.json";
 
+enum Command {
+    SyncAndExit,
+    SyncNow,
+    ExitNow,
+}
+
 fn map_dir(basepath: &PathBuf, exclude_globs: &GlobSet) -> Result<DirIndex,  Box<dyn Error>> {
     let basepath_str = basepath.to_str().unwrap();
     let current_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
@@ -314,22 +320,32 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, interval: u64, exclude_globs: GlobS
                 println!("One scan task encountered an error!");
                 continue;
             }
-            diffs_a = compare_dirs(&index_a_new, &index_a)?;
-            diffs_b = compare_dirs(&index_b_new, &index_b)?;
-            if !diffs_a.is_empty() || !diffs_b.is_empty() {    
-                if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
-                    solve_conflicts(&mut diffs_a, &mut diffs_b)?;
-                    sync_diffs(&diffs_a, path_a, path_b, false)?;
-                    sync_diffs(&diffs_b, path_b, path_a, false)?;
-                    index_a = map_dir(path_a, &exclude_globs)?;
-                    index_b = map_dir(path_b, &exclude_globs)?;
-                    save_index(&index_a, &path_a)?;
-                    save_index(&index_b, &path_b)?;
+            let syncresult: Result<(), Box<dyn Error>> = {
+                diffs_a = compare_dirs(&index_a_new, &index_a).unwrap();
+                diffs_b = compare_dirs(&index_b_new, &index_b).unwrap();
+                if !diffs_a.is_empty() || !diffs_b.is_empty() {    
+                    if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
+                        solve_conflicts(&mut diffs_a, &mut diffs_b).unwrap();
+                        sync_diffs(&diffs_a, path_a, path_b, false)?;
+                        sync_diffs(&diffs_b, path_b, path_a, false)?;
+                        index_a = map_dir(path_a, &exclude_globs)?;
+                        index_b = map_dir(path_b, &exclude_globs)?;
+                        save_index(&index_a, &path_a)?;
+                        save_index(&index_b, &path_b)?;
+                    }
+                    else {
+                        println!("One directory became unavailable while scanning!");
+                    }
                 }
-                else {
-                    println!("One directory became unavailable while scanning!");
+            Ok(())
+            };
+            match syncresult {
+                Ok(_) => {},
+                Err(e) => {
+                    println!("Sync job returned an error {}", e);
                 }
             }
+
         }
         else {
             println!("One directory is unavailable!");
