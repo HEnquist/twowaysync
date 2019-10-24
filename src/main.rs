@@ -57,7 +57,6 @@ fn map_dir(basepath: &PathBuf, exclude_globs: &GlobSet) -> Result<DirIndex,  Box
         else {
             FileType::File
         };
-        //println!("insert {}",relpath.to_path_buf().display());
         paths.insert(
             relpath,
             PathData {
@@ -304,8 +303,6 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, mut index_a: DirIndex, mut index_b:
 
     let delay = Duration::from_millis(1000*interval);
     
-    //let mut index_a: DirIndex;
-    //let mut index_b: DirIndex;
     let mut index_a_new: DirIndex;
     let mut index_b_new: DirIndex;
 
@@ -320,20 +317,11 @@ fn watch(path_a: &PathBuf, path_b: &PathBuf, mut index_a: DirIndex, mut index_b:
 
     while run {
         run = match rx.recv_timeout(delay) {
-            Ok(Command::SyncAndExit) => {
-                println!("Exiting after next sync...\r");
-                false
-            },
-            Ok(Command::SyncNow) => {
-                println!("Syncing now...\r");
-                true
-            },
-            Ok(Command::ExitNow) => {
-                println!("Exiting now...\r");
-                break;
-            },
+            Ok(Command::SyncAndExit) => false,
+            Ok(Command::SyncNow) => true,
+            Ok(Command::ExitNow) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => true,
-            _ => true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         if fs::metadata(&index_a_file).is_ok() && fs::metadata(&index_b_file).is_ok() {
             if let (Ok(idx_a), Ok(idx_b)) = (map_dir(path_a, &exclude_globs), map_dir(path_b, &exclude_globs)) {
@@ -465,7 +453,7 @@ fn main() {
 
     let interval = match matches.value_of("interval") {
         Some(i) => i.parse::<u64>().unwrap(),
-        _ => 0,
+        _ => 10,
     };
 
     let mut builder = GlobSetBuilder::new();
@@ -482,7 +470,7 @@ fn main() {
 
     let indexes = prepare_dirs(&path_a, &path_b, check_only, &exclude_globs).unwrap();
 
-    if !check_only && !single_sync {
+    if !check_only {
         let (index_a, index_b) = indexes.unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -495,28 +483,36 @@ fn main() {
             }
         });
 
-        println!("Watching for changes every {} seconds.\r\nPress S to sync now, Q to sync now and exit, or Ctrl-C to exit immediately.\r", interval);
-        tx.send(Command::SyncNow).unwrap();
+        if !single_sync {
+            println!("Watching for changes every {} seconds.\r\nPress S to sync now, Q to sync now and exit, or Ctrl-C to exit immediately.\r", interval);
+            tx.send(Command::SyncNow).unwrap();
 
-        for c in std_in.keys() {
-            match c.unwrap() {
-                Key::Char('q') | Key::Esc => {
-                    tx.send(Command::SyncAndExit).unwrap();
-                    let _res = worker.join();
-                    break;
-                },
-                Key::Char('s') => {
-                    tx.send(Command::SyncNow)
-                },
-                Key::Ctrl('c') => {
-                    tx.send(Command::ExitNow).unwrap();
-                    let _res = worker.join();
-                    break;
-                },
-                _ => Ok(())
-            }.unwrap();
-            //write!(std_out, "\r\n").unwrap();
-            //std_out.flush().unwrap();
+            for c in std_in.keys() {
+                match c.unwrap() {
+                    Key::Char('q') | Key::Esc => {
+                        println!("Exiting after next sync...\r");
+                        tx.send(Command::SyncAndExit).unwrap();
+                        let _res = worker.join();
+                        break;
+                    },
+                    Key::Char('s') => {
+                        println!("Syncing now...\r");
+                        tx.send(Command::SyncNow)
+                    },
+                    Key::Ctrl('c') => {
+                        println!("Exiting now...\r");
+                        tx.send(Command::ExitNow).unwrap();
+                        let _res = worker.join();
+                        break;
+                    },
+                    _ => Ok(())
+                }.unwrap();
+            }
+        }
+        else {
+            println!("Syncing once...\r");
+            tx.send(Command::SyncAndExit).unwrap();
+            let _res = worker.join();
         }
     }
     write!(std_out, "\r").unwrap();
