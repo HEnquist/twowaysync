@@ -275,7 +275,7 @@ fn prepare_dirs(path_a: &PathBuf, path_b: &PathBuf, check_only: bool, exclude_gl
             }
             println!("No index found, merging the contents of A and B\r");
             println!("This will sync all content of \r\n> {}\r\nwith\r\n> {}\r", path_a.display(), path_b.display());
-            println!("Press Y to continue, any other key to abort.\r");
+            println!("Press y to continue, any other key to abort.\r");
             let std_in = stdin();
             let _std_out = stdout().into_raw_mode().unwrap();
             let key = std_in.keys().next().unwrap();
@@ -437,7 +437,7 @@ fn main() {
                                     .index(2))
                     .get_matches();
     
-    let check_only = matches.is_present("check");
+    let mut check_only = matches.is_present("check");
 
     let single_sync = matches.is_present("single");
 
@@ -453,7 +453,12 @@ fn main() {
 
     let interval = match matches.value_of("interval") {
         Some(i) => i.parse::<u64>().unwrap(),
-        _ => 10,
+        _ => {
+            if !single_sync {
+                check_only = true;
+            }
+            1000000
+        },
     };
 
     let mut builder = GlobSetBuilder::new();
@@ -469,8 +474,8 @@ fn main() {
     let mut std_out = stdout().into_raw_mode().unwrap();
 
     let indexes = prepare_dirs(&path_a, &path_b, check_only, &exclude_globs).unwrap();
-
-    if !check_only {
+    
+    if !check_only && indexes.is_some() {
         let (index_a, index_b) = indexes.unwrap();
 
         let (tx, rx) = mpsc::channel();
