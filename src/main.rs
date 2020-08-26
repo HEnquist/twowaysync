@@ -396,6 +396,10 @@ fn watch(
                         println!("One directory became unavailable while scanning!\r");
                     }
                 }
+                else {
+                    let local_time = Local::now();
+                    println!("No changes, completed at {}\r", local_time);
+                }
                 Ok(())
             };
             match syncresult {
