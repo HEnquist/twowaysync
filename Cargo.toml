@@ -1,6 +1,6 @@
 [package]
 name = "twowaysync"
-version = "0.1.3"
+version = "0.1.4"
 authors = ["henenq <henrik.enquist@maxiv.lu.se>"]
 edition = "2018"
 description = "Twowaysync is a utility for keeping two folders in sync, by tracking and copying changes."
